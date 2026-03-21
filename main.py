@@ -113,8 +113,9 @@ async def root():
                     html += '<div class="product-card ' + (isBest ? 'best' : '') + '">';
                     if (isBest) html += '<div class="best-badge">Best Deal</div>';
                     html += '<div class="product-name">' + p.name + '</div>';
+                    if (p.details) html += '<div style="color:#94a3b8;font-size:0.8rem;margin-bottom:0.5rem;">' + p.details + '</div>';
                     html += '<div class="product-meta">';
-                    html += '<div class="product-price">&#8377;' + p.price.toLocaleString() + '</div>';
+                    html += '<div class="product-price">' + (p.price > 0 ? '&#8377;' + p.price.toLocaleString('en-IN') : 'Click to check') + '</div>';
                     html += '<div class="product-info">';
                     html += '<div class="product-site">' + p.site + '</div>';
                     if (p.rating) html += '<div class="product-rating">&#9733; ' + p.rating + '</div>';

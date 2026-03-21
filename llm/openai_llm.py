@@ -7,8 +7,11 @@ def summarize_products(products: List[Product]) -> str:
     openai_key = os.environ.get("OPENAI_API_KEY")
 
     if not groq_key and not openai_key:
-        best = min(products, key=lambda p: p.price)
-        return f"Recommendation: {best.name} from {best.site} at price {best.price} (lowest price). Note: AI summary unavailable - no API key set."
+        priced = [p for p in products if p.price > 0]
+        if priced:
+            best = min(priced, key=lambda p: p.price)
+            return f"Recommendation: {best.name} from {best.site} at ₹{best.price:,.0f} (lowest price). Note: AI summary unavailable - no API key set."
+        return "No priced products found. Please check the sites directly for current prices."
 
     try:
         from openai import OpenAI
@@ -22,8 +25,12 @@ def summarize_products(products: List[Product]) -> str:
 
         prompt = "Compare the following products and suggest the best one for a user who wants to save money and time. Explain your reasoning.\n\n"
         for p in products:
-            prompt += f"- {p.name} | Price: {p.price} | Site: {p.site} | Rating: {p.rating}\n"
-        prompt += "\nGive a clear, concise recommendation."
+            if p.price > 0:
+                prompt += f"- {p.name} | Price: ₹{p.price:,.0f} | Site: {p.site}"
+                if p.rating:
+                    prompt += f" | Rating: {p.rating}"
+                prompt += "\n"
+        prompt += "\nGive a clear, concise recommendation in 2-3 sentences."
 
         response = client.chat.completions.create(
             model=model,
@@ -31,8 +38,11 @@ def summarize_products(products: List[Product]) -> str:
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        best = min(products, key=lambda p: p.price)
-        return f"Recommendation: {best.name} from {best.site} at price {best.price} (lowest price). Note: AI summary failed - {str(e)}"
+        priced = [p for p in products if p.price > 0]
+        if priced:
+            best = min(priced, key=lambda p: p.price)
+            return f"Recommendation: {best.name} from {best.site} at ₹{best.price:,.0f} (lowest price)."
+        return "Could not determine best price. Please check the sites directly."
 
 
 def chat_with_ai(message: str, history: list = None) -> str:

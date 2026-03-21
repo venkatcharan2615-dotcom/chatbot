@@ -56,6 +56,37 @@ async def root():
         .summary-card { background: linear-gradient(135deg, rgba(99,102,241,0.1), rgba(139,92,246,0.1)); border: 1px solid rgba(129,140,248,0.2); padding: 1.25rem 1.5rem; border-radius: 16px; margin-bottom: 2rem; line-height: 1.6; }
         .summary-card strong { color: #a5b4fc; }
         .section-title { font-size: 1.1rem; font-weight: 600; color: #c4b5fd; margin-bottom: 1rem; }
+
+        /* Comparison Table */
+        .compare-table { width: 100%; border-collapse: separate; border-spacing: 0; border-radius: 16px; overflow: hidden; background: rgba(30,41,59,0.7); backdrop-filter: blur(8px); border: 1px solid #334155; }
+        .compare-table thead th { background: rgba(99,102,241,0.15); color: #a5b4fc; padding: 0.85rem 1rem; text-align: left; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #334155; }
+        .compare-table thead th:first-child { border-radius: 16px 0 0 0; }
+        .compare-table thead th:last-child { border-radius: 0 16px 0 0; }
+        .compare-table tbody tr { transition: background 0.15s; }
+        .compare-table tbody tr:hover { background: rgba(99,102,241,0.06); }
+        .compare-table tbody tr:not(:last-child) td { border-bottom: 1px solid rgba(51,65,85,0.5); }
+        .compare-table tbody td { padding: 0.9rem 1rem; font-size: 0.9rem; vertical-align: middle; }
+        .compare-table .rank { font-weight: 700; color: #64748b; text-align: center; width: 40px; }
+        .compare-table .site-cell { white-space: nowrap; }
+        .compare-table .site-pill { display: inline-block; background: rgba(99,102,241,0.15); color: #a5b4fc; padding: 4px 12px; border-radius: 6px; font-size: 0.8rem; font-weight: 600; }
+        .compare-table .name-cell { color: #cbd5e1; line-height: 1.4; max-width: 350px; }
+        .compare-table .price-cell { font-weight: 700; font-size: 1.05rem; color: #4ade80; white-space: nowrap; }
+        .compare-table .action-cell { text-align: center; }
+        .compare-table .visit-btn { display: inline-block; padding: 6px 16px; border-radius: 8px; background: rgba(99,102,241,0.15); color: #818cf8; text-decoration: none; font-size: 0.8rem; font-weight: 600; transition: all 0.15s; border: 1px solid rgba(99,102,241,0.2); }
+        .compare-table .visit-btn:hover { background: rgba(99,102,241,0.3); color: #a5b4fc; border-color: rgba(99,102,241,0.4); }
+        .compare-table tr.best-row { background: rgba(74,222,128,0.06); }
+        .compare-table tr.best-row td { border-bottom-color: rgba(74,222,128,0.2); }
+        .best-tag { display: inline-block; background: linear-gradient(135deg, #16a34a, #22c55e); color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; margin-left: 6px; vertical-align: middle; letter-spacing: 0.3px; }
+        .no-price-section { margin-top: 1.5rem; }
+        .no-price-toggle { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 0.5rem; }
+        .no-price-toggle .arrow { transition: transform 0.2s; display: inline-block; }
+        .no-price-toggle.open .arrow { transform: rotate(180deg); }
+        .no-price-list { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
+        .no-price-chip { background: rgba(51,65,85,0.5); border: 1px solid #334155; padding: 6px 14px; border-radius: 10px; display: flex; align-items: center; gap: 0.5rem; }
+        .no-price-chip .chip-site { color: #94a3b8; font-size: 0.85rem; font-weight: 500; }
+        .no-price-chip a { color: #64748b; text-decoration: none; font-size: 0.75rem; }
+        .no-price-chip a:hover { color: #818cf8; text-decoration: underline; }
+
         .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; }
         .product-card { background: rgba(30,41,59,0.7); backdrop-filter: blur(8px); border-radius: 16px; padding: 1.25rem; border: 1px solid #334155; transition: transform 0.2s, border-color 0.2s; position: relative; overflow: hidden; }
         .product-card:hover { transform: translateY(-3px); border-color: #475569; }
@@ -70,6 +101,14 @@ async def root():
         .product-link { display: inline-block; margin-top: 0.75rem; color: #818cf8; text-decoration: none; font-size: 0.85rem; font-weight: 500; }
         .product-link:hover { color: #a5b4fc; text-decoration: underline; }
         .error-card { background: rgba(127,29,29,0.3); border: 1px solid rgba(239,68,68,0.3); padding: 1.25rem; border-radius: 12px; text-align: center; color: #fca5a5; }
+
+        /* Responsive table */
+        @media (max-width: 640px) {
+            .compare-table { font-size: 0.82rem; }
+            .compare-table thead th, .compare-table tbody td { padding: 0.6rem 0.5rem; }
+            .compare-table .name-cell { max-width: 150px; }
+            .compare-table .rank { width: 28px; }
+        }
 
         /* Chat Tab */
         .chat-container { max-width: 750px; margin: 0 auto; display: flex; flex-direction: column; height: 65vh; }
@@ -122,9 +161,7 @@ async def root():
                 <span class="site-tag">Snapdeal</span>
                 <span class="site-tag">Ajio</span>
                 <span class="site-tag">TataCliq</span>
-                <span class="site-tag">Zepto</span>
-                <span class="site-tag">Zomato</span>
-                <span class="site-tag">Instamart</span>
+                <span class="site-tag">+ Zepto, Zomato, Instamart for groceries</span>
             </div>
             <div class="loading" id="loading">
                 <div class="spinner"></div>
@@ -181,25 +218,46 @@ async def root():
                 });
                 if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Request failed'); }
                 const data = await res.json();
-                let html = '<div class="summary-card"><strong>AI Recommendation:</strong> ' + data.summary + '</div>';
-                html += '<div class="section-title">Found ' + data.all_products.length + ' products</div>';
-                html += '<div class="product-grid">';
-                data.all_products.forEach(p => {
-                    const isBest = p.name === data.best_product.name && p.site === data.best_product.site;
-                    html += '<div class="product-card ' + (isBest ? 'best' : '') + '">';
-                    if (isBest) html += '<div class="best-badge">Best Deal</div>';
-                    html += '<div class="product-name">' + p.name + '</div>';
-                    if (p.details) html += '<div style="color:#94a3b8;font-size:0.8rem;margin-bottom:0.5rem;">' + p.details + '</div>';
-                    html += '<div class="product-meta">';
-                    html += '<div class="product-price">' + (p.price > 0 ? '&#8377;' + p.price.toLocaleString('en-IN') : 'Click to check') + '</div>';
-                    html += '<div class="product-info">';
-                    html += '<div class="product-site">' + p.site + '</div>';
-                    if (p.rating) html += '<div class="product-rating">&#9733; ' + p.rating + '</div>';
+                const priced = data.all_products.filter(p => p.price > 0).sort((a,b) => a.price - b.price);
+                const unpriced = data.all_products.filter(p => p.price <= 0);
+                let html = '<div class="summary-card"><strong>&#129302; AI Recommendation:</strong> ' + data.summary + '</div>';
+
+                if (priced.length > 0) {
+                    html += '<div class="section-title">Price Comparison &mdash; ' + priced.length + ' results found</div>';
+                    html += '<table class="compare-table"><thead><tr>';
+                    html += '<th>#</th><th>Site</th><th>Product</th><th>Price</th><th>Action</th>';
+                    html += '</tr></thead><tbody>';
+                    priced.forEach((p, i) => {
+                        const isBest = i === 0;
+                        html += '<tr class="' + (isBest ? 'best-row' : '') + '">';
+                        html += '<td class="rank">' + (i+1) + '</td>';
+                        html += '<td class="site-cell"><span class="site-pill">' + p.site + '</span></td>';
+                        html += '<td class="name-cell">' + p.name;
+                        if (isBest) html += '<span class="best-tag">&#9733; Best Price</span>';
+                        html += '</td>';
+                        html += '<td class="price-cell">&#8377;' + p.price.toLocaleString('en-IN') + '</td>';
+                        html += '<td class="action-cell">';
+                        if (p.url) html += '<a class="visit-btn" href="' + p.url + '" target="_blank" rel="noopener">Visit &rarr;</a>';
+                        html += '</td></tr>';
+                    });
+                    html += '</tbody></table>';
+                } else {
+                    html += '<div class="section-title">No prices found &mdash; check the sites below</div>';
+                }
+
+                if (unpriced.length > 0) {
+                    html += '<div class="no-price-section">';
+                    html += '<div class="section-title no-price-toggle" id="npToggle" onclick="this.classList.toggle(\'open\');document.getElementById(\'npList\').style.display=document.getElementById(\'npList\').style.display===\'none\'?\'flex\':\'none\'">';
+                    html += 'Also check on ' + unpriced.length + ' more site' + (unpriced.length>1?'s':'') + ' <span class="arrow">&#9660;</span></div>';
+                    html += '<div class="no-price-list" id="npList" style="display:none;">';
+                    unpriced.forEach(p => {
+                        html += '<div class="no-price-chip">';
+                        html += '<span class="chip-site">' + p.site + '</span>';
+                        if (p.url) html += '<a href="' + p.url + '" target="_blank" rel="noopener">Search &rarr;</a>';
+                        html += '</div>';
+                    });
                     html += '</div></div>';
-                    if (p.url) html += '<a class="product-link" href="' + p.url + '" target="_blank" rel="noopener">View on ' + p.site + ' &rarr;</a>';
-                    html += '</div>';
-                });
-                html += '</div>';
+                }
                 results.innerHTML = html;
             } catch(e) {
                 results.innerHTML = '<div class="error-card">' + e.message + '</div>';
@@ -271,10 +329,47 @@ SCRAPER_MAP = {
     "instamart": scrape_instamart,
 }
 
+# Category-aware site selection
+GROCERY_SITES = {"zepto", "zomato", "instamart"}
+ELECTRONICS_SITES = {"amazon", "flipkart", "snapdeal", "tatacliq"}
+FASHION_SITES = {"myntra", "ajio"}
+GENERAL_SITES = {"amazon", "flipkart"}  # Always search these
+
+_GROCERY_KW = {"milk", "bread", "rice", "dal", "sugar", "atta", "oil", "eggs", "butter", "cheese",
+               "vegetables", "fruits", "snacks", "chips", "biscuits", "chocolate", "juice", "water",
+               "grocery", "groceries", "food", "drink", "beverages", "masala", "spice"}
+_ELECTRONICS_KW = {"phone", "mobile", "laptop", "tablet", "tv", "television", "headphone", "earbuds",
+                   "camera", "watch", "smartwatch", "speaker", "monitor", "printer", "router",
+                   "iphone", "samsung", "pixel", "oneplus", "macbook", "ipad", "airpods", "galaxy"}
+_FASHION_KW = {"shirt", "tshirt", "jeans", "dress", "shoes", "sneakers", "jacket", "kurta", "saree",
+               "kurti", "sandals", "heels", "handbag", "bag", "backpack", "sunglasses", "perfume",
+               "makeup", "cosmetics", "lipstick", "foundation", "clothing", "fashion", "wear"}
+
+def _pick_sites(query: str) -> list:
+    """Pick relevant sites based on query keywords."""
+    q_lower = query.lower().split()
+    q_words = set(q_lower)
+    is_grocery = bool(q_words & _GROCERY_KW)
+    is_electronics = bool(q_words & _ELECTRONICS_KW)
+    is_fashion = bool(q_words & _FASHION_KW)
+
+    if is_grocery and not is_electronics and not is_fashion:
+        return list(GROCERY_SITES | GENERAL_SITES)
+    if is_electronics and not is_grocery:
+        return list(ELECTRONICS_SITES | FASHION_SITES)  # Include fashion sites as they may carry accessories
+    if is_fashion and not is_grocery:
+        return list(FASHION_SITES | GENERAL_SITES | {"snapdeal", "tatacliq"})
+    # Default: all non-grocery sites
+    return [s for s in SCRAPER_MAP if s not in GROCERY_SITES]
+
+
 @app.post("/chatbot/compare", response_model=ComparisonResult)
 async def compare_endpoint(request: ComparisonRequest):
     try:
-        sites = request.sites or list(SCRAPER_MAP.keys())
+        if request.sites:
+            sites = request.sites
+        else:
+            sites = _pick_sites(request.query)
         tasks = [SCRAPER_MAP[site](request.query) for site in sites if site in SCRAPER_MAP]
         if not tasks:
             raise HTTPException(status_code=400, detail="No valid e-commerce sites specified.")
@@ -283,7 +378,9 @@ async def compare_endpoint(request: ComparisonRequest):
         if not all_products:
             raise HTTPException(status_code=404, detail="No products found.")
         best = compare_products(all_products)
-        summary = summarize_products(all_products)
+        # Only send priced products to AI for better recommendations
+        priced = [p for p in all_products if p.price > 0]
+        summary = summarize_products(priced if priced else all_products)
         return ComparisonResult(best_product=best, all_products=all_products, summary=summary)
     except HTTPException:
         raise

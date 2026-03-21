@@ -1,0 +1,14 @@
+# Render Deployment Configuration for LLM Product Comparison Chatbot
+
+# 1. Environment
+python_version = "3.12"
+
+# 2. Start Command
+start = "uvicorn main:app --host 0.0.0.0 --port 10000"
+
+# 3. Requirements
+# (Handled by requirements.txt)
+
+# 4. Notes
+# - Set your OpenAI API key as an environment variable in Render: OPENAI_API_KEY
+# - Exposes the API at https://<your-app-name>.onrender.com/chatbot/compare

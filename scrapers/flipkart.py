@@ -1,8 +1,8 @@
 from models import Product
 from typing import List
 import httpx
-from bs4 import BeautifulSoup
+from urllib.parse import quote_plus
 
 async def scrape_flipkart(query: str) -> List[Product]:
-    # Placeholder: Replace with real scraping logic or Flipkart API
-    return [Product(name=f"Flipkart {query}", price=950.0, url="https://flipkart.com/dummy", site="Flipkart", rating=4.0)]
+    search_url = f"https://www.flipkart.com/search?q={quote_plus(query)}"
+    return [Product(name=f"Flipkart {query}", price=950.0, url=search_url, site="Flipkart", rating=4.0)]

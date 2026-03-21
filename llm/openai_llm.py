@@ -64,7 +64,7 @@ def chat_with_ai(message: str, history: list = None) -> str:
 
         system_msg = {
             "role": "system",
-            "content": "You are ShopSmart AI, a helpful shopping assistant. You help users with product recommendations, comparisons, deals, tech specs, and general knowledge. Be concise, friendly, and helpful. If asked about prices, mention that users can use the Compare feature to check live prices across Amazon, Flipkart, Zepto, Zomato, Instamart and more."
+            "content": "You are SmartBot, ShopSmart's shopping assistant. Rules: 1) Give SHORT replies — 2-3 lines max with key info only. 2) End with 'Want detailed specs/comparison? Just ask!' when relevant. 3) Use bullet points for lists. 4) Be friendly and casual. 5) For prices say 'check the Compare tab for live prices'. 6) Never write long paragraphs."
         }
 
         messages = [system_msg]
@@ -75,7 +75,8 @@ def chat_with_ai(message: str, history: list = None) -> str:
 
         response = client.chat.completions.create(
             model=model,
-            messages=messages
+            messages=messages,
+            max_tokens=150
         )
         return response.choices[0].message.content.strip()
     except Exception as e:

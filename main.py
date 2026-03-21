@@ -129,8 +129,8 @@ async def root():
         .chat-send { padding: 0.75rem 1.5rem; border-radius: 10px; border: none; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: transform 0.15s; }
         .chat-send:hover { transform: translateY(-1px); }
         .chat-send:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-        .welcome-msg { text-align: center; color: #64748b; padding: 3rem 1rem; font-size: 0.95rem; }
-        .welcome-msg .welcome-icon { font-size: 2.5rem; margin-bottom: 0.75rem; }
+        .welcome-msg { text-align: center; color: #94a3b8; padding: 2rem 1.5rem; font-size: 0.95rem; line-height: 1.6; }
+        .welcome-msg .welcome-icon { font-size: 3rem; margin-bottom: 0.5rem; }
         .welcome-msg strong { color: #a5b4fc; }
 
         .footer { text-align: center; margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid #1e293b; color: #475569; font-size: 0.8rem; }
@@ -175,9 +175,17 @@ async def root():
             <div class="chat-container">
                 <div class="chat-messages" id="chatMessages">
                     <div class="welcome-msg">
-                        <div class="welcome-icon">&#129302;</div>
-                        <strong>Hi! I'm ShopSmart AI</strong><br>
-                        Ask me anything &mdash; product advice, comparisons, tech specs, deals, or any question!
+                        <div class="welcome-icon">&#128722;</div>
+                        <strong>Welcome to ShopSmart!</strong><br><br>
+                        I'm <strong>SmartBot</strong>, your personal shopping assistant. &#128075;<br><br>
+                        <span style="color:#94a3b8;">Here's what I can help you with:</span><br>
+                        <div style="display:inline-block;text-align:left;margin-top:0.5rem;line-height:2;">
+                            &#127993; Product recommendations<br>
+                            &#128176; Price &amp; deal tips<br>
+                            &#128295; Tech specs &amp; comparisons<br>
+                            &#11088; Best brand suggestions
+                        </div><br><br>
+                        <span style="color:#818cf8;">Try: &quot;Best phone under 20k&quot; or &quot;iPhone vs Samsung&quot;</span>
                     </div>
                 </div>
                 <div class="chat-input-row">

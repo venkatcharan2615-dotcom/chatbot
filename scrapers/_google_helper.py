@@ -52,27 +52,26 @@ def _parse_price(text: str) -> float:
 
 
 async def google_price_search(query: str, site_domain: str, site_name: str, fallback_url: str) -> List[Product]:
-    """Try multiple search engines to get real product prices."""
+    """Try multiple search engines in parallel to get real product prices."""
+    import asyncio
 
-    # Strategy 1: Google search
-    products = await _google_search(query, site_domain, site_name, fallback_url)
-    if products:
-        return products
+    async def _try_strategy(coro):
+        try:
+            return await coro
+        except Exception:
+            return []
 
-    # Strategy 2: DuckDuckGo search
-    products = await _ddg_search(query, site_domain, site_name, fallback_url)
-    if products:
-        return products
+    # Run all strategies in parallel — first one with results wins
+    results = await asyncio.gather(
+        _try_strategy(_google_search(query, site_domain, site_name, fallback_url)),
+        _try_strategy(_ddg_search(query, site_domain, site_name, fallback_url)),
+        _try_strategy(_bing_search(query, site_domain, site_name, fallback_url)),
+        _try_strategy(_direct_scrape(query, site_domain, site_name, fallback_url)),
+    )
 
-    # Strategy 3: Bing search
-    products = await _bing_search(query, site_domain, site_name, fallback_url)
-    if products:
-        return products
-
-    # Strategy 4: Direct scraping with JSON-LD + meta + text extraction
-    products = await _direct_scrape(query, site_domain, site_name, fallback_url)
-    if products:
-        return products
+    for products in results:
+        if products:
+            return products
 
     return [Product(
         name=f"{site_name} {query}",

@@ -259,7 +259,7 @@ async def root():
 
                 if (unpriced.length > 0) {
                     html += '<div class="no-price-section">';
-                    html += '<div class="section-title no-price-toggle" id="npToggle" onclick="this.classList.toggle(\'open\');document.getElementById(\'npList\').style.display=document.getElementById(\'npList\').style.display===\'none\'?\'flex\':\'none\'">';
+                    html += '<div class="section-title no-price-toggle" id="npToggle" onclick="toggleNp()">'; 
                     html += 'Also check on ' + unpriced.length + ' more site' + (unpriced.length>1?'s':'') + ' <span class="arrow">&#9660;</span></div>';
                     html += '<div class="no-price-list" id="npList" style="display:none;">';
                     unpriced.forEach(p => {
@@ -282,6 +282,13 @@ async def root():
             const d = document.createElement('div');
             d.textContent = s;
             return d.innerHTML;
+        }
+
+        function toggleNp() {
+            var t = document.getElementById('npToggle');
+            var l = document.getElementById('npList');
+            if (t) t.classList.toggle('open');
+            if (l) l.style.display = l.style.display === 'none' ? 'flex' : 'none';
         }
 
         async function sendChat() {

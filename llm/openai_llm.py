@@ -1,9 +1,11 @@
+
 import openai
+import os
 from typing import List
 from models import Product
 
-# Set your OpenAI API key here or use environment variable
-openai.api_key = "YOUR_OPENAI_API_KEY"
+# Set your OpenAI API key from environment variable
+openai.api_key = os.environ.get("OPENAI_API_KEY")
 
 def summarize_products(products: List[Product]) -> str:
     prompt = f"""

@@ -9,6 +9,7 @@ from scrapers.others import (
 )
 from compare import compare_products
 from llm.openai_llm import summarize_products, chat_with_ai
+from affiliate import tag_products
 import asyncio
 
 app = FastAPI()
@@ -195,7 +196,10 @@ async def root():
             </div>
         </div>
 
-        <div class="footer">ShopSmart &mdash; AI-Powered Product Comparison & Chat</div>
+        <div class="footer">
+            ShopSmart &mdash; AI-Powered Product Comparison & Chat<br>
+            <span style="font-size:0.7rem;color:#374151;margin-top:4px;display:inline-block;">Some links may earn us a small commission at no extra cost to you. This helps keep ShopSmart free.</span>
+        </div>
     </div>
     <script>
         let chatHistory = [];
@@ -422,6 +426,7 @@ async def compare_endpoint(request: ComparisonRequest):
         if not all_products:
             raise HTTPException(status_code=404, detail="No products found.")
         best = compare_products(all_products)
+        tag_products(all_products)
         priced = [p for p in all_products if p.price > 0]
         summary = summarize_products(priced if priced else all_products)
         return ComparisonResult(best_product=best, all_products=all_products, summary=summary)

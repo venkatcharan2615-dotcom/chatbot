@@ -98,7 +98,7 @@ def _parse_price(text: str) -> float:
 
 
 async def google_price_search(query: str, site_domain: str, site_name: str, fallback_url: str) -> List[Product]:
-    """Try multiple search engines in parallel to get real product prices."""
+    """Try multiple search strategies in parallel to get real product prices."""
     import asyncio
 
     refined = _refine_query(query)
@@ -109,12 +109,12 @@ async def google_price_search(query: str, site_domain: str, site_name: str, fall
         except Exception:
             return []
 
-    # Run all strategies in parallel — first one with results wins
+    # Brave Search works best from cloud IPs, DDG Lite as backup, plus direct scrape
     results = await asyncio.gather(
-        _try_strategy(_google_search(refined, site_domain, site_name, fallback_url)),
-        _try_strategy(_ddg_search(refined, site_domain, site_name, fallback_url)),
-        _try_strategy(_bing_search(refined, site_domain, site_name, fallback_url)),
+        _try_strategy(_brave_search(refined, site_domain, site_name, fallback_url)),
+        _try_strategy(_ddg_lite_search(refined, site_domain, site_name, fallback_url)),
         _try_strategy(_direct_scrape(query, site_domain, site_name, fallback_url)),
+        _try_strategy(_bing_search(refined, site_domain, site_name, fallback_url)),
     )
 
     for products in results:
@@ -122,7 +122,6 @@ async def google_price_search(query: str, site_domain: str, site_name: str, fall
         filtered = [p for p in products if not _is_accessory(p.name)]
         if filtered:
             return filtered
-        # If all results are accessories, still return them (user might want accessories)
         if products:
             return products
 
@@ -136,30 +135,87 @@ async def google_price_search(query: str, site_domain: str, site_name: str, fall
     )]
 
 
-async def _google_search(query: str, site_domain: str, site_name: str, fallback_url: str) -> List[Product]:
-    search_query = f"{query} price site:{site_domain}"
-    google_url = f"https://www.google.com/search?q={quote_plus(search_query)}&hl=en&gl=in"
+async def brave_web_search(query: str) -> str:
+    """Search the web via Brave and return text snippets for AI grounding."""
+    url = "https://search.brave.com/search"
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=8) as client:
-            resp = await client.get(google_url, headers=_get_headers(0))
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+            resp = await client.get(url, params={"q": query, "country": "in"}, headers={
+                "User-Agent": _USER_AGENTS[0],
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-IN,en;q=0.9",
+            })
+        if resp.status_code != 200:
+            return ""
+        soup = BeautifulSoup(resp.text, "html.parser")
+        snippets = []
+        for r in soup.select("#results .snippet, [data-type='web']")[:6]:
+            title_el = r.select_one(".snippet-title, .title, h2, a")
+            desc_el = r.select_one(".snippet-description, .snippet-content, .description")
+            title = title_el.get_text(strip=True) if title_el else ""
+            desc = desc_el.get_text(strip=True) if desc_el else ""
+            if title:
+                snippets.append(f"- {title}: {desc}" if desc else f"- {title}")
+        return "\n".join(snippets[:5])
+    except Exception:
+        return ""
+
+
+def _clean_brave_title(title: str, site_name: str) -> str:
+    """Strip Brave's site-name prefix from titles like 'Flipkartflipkart.com› home › ...'."""
+    # Remove site prefix patterns like "Flipkartflipkart.com› path › ..."
+    title = re.sub(r'^[A-Za-z]+[a-z]+\.(?:com|in|org)[›\s]+(?:[^›]+[›\s]+)*', '', title).strip()
+    # Remove YouTube duration prefix like "05:47YouTube"
+    title = re.sub(r'^\d{2}:\d{2}YouTube', '', title).strip()
+    # Remove leading site names
+    for prefix in [site_name, "Times of India", "YouTube", "My Mobile India"]:
+        if title.startswith(prefix):
+            title = title[len(prefix):].strip()
+    # Clean breadcrumb separators
+    title = re.sub(r'^[›\-\|:]+\s*', '', title).strip()
+    return title if title else f"{site_name} product"
+
+
+async def _brave_search(query: str, site_domain: str, site_name: str, fallback_url: str) -> List[Product]:
+    """Brave Search — works reliably from cloud IPs."""
+    search_query = f"{query} price {site_name} India"
+    url = "https://search.brave.com/search"
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+            resp = await client.get(url, params={"q": search_query, "country": "in"}, headers={
+                "User-Agent": _USER_AGENTS[0],
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-IN,en;q=0.9",
+            })
         if resp.status_code != 200:
             return []
         soup = BeautifulSoup(resp.text, "html.parser")
         products = []
-        for result in soup.select("div.g, div[data-hveid]")[:5]:
-            title_el = result.select_one("h3")
-            link_el = result.select_one("a[href]")
-            if not title_el:
+        site_lower = site_name.lower()
+
+        for r in soup.select("#results .snippet, [data-type='web']")[:10]:
+            title_el = r.select_one(".snippet-title, .title, h2 a, a")
+            desc_el = r.select_one(".snippet-description, .snippet-content, .description")
+            url_el = r.select_one("a[href^='http']")
+
+            title = title_el.get_text(strip=True) if title_el else ""
+            desc = desc_el.get_text(strip=True) if desc_el else ""
+            href = url_el.get("href", "") if url_el else ""
+            all_text = title + " " + desc
+
+            # Must relate to our target site
+            if site_lower not in all_text.lower() and site_domain not in href:
                 continue
-            title = title_el.get_text(strip=True)
-            href = link_el["href"] if link_el else fallback_url
-            if href.startswith("/url?q="):
-                href = href.split("/url?q=")[1].split("&")[0]
-            if site_domain not in href:
-                continue
-            price = _parse_price(result.get_text(" ", strip=True))
+
+            price = _parse_price(all_text)
             if price > 0:
-                products.append(Product(name=title[:100], price=price, url=href, site=site_name, rating=None))
+                product_url = href if site_domain in href else fallback_url
+                clean_title = _clean_brave_title(title, site_name) if title else f"{site_name} {query}"
+                products.append(Product(
+                    name=clean_title[:100],
+                    price=price, url=product_url, site=site_name, rating=None
+                ))
+
         if products:
             return products[:3]
     except Exception:
@@ -167,35 +223,51 @@ async def _google_search(query: str, site_domain: str, site_name: str, fallback_
     return []
 
 
-async def _ddg_search(query: str, site_domain: str, site_name: str, fallback_url: str) -> List[Product]:
-    region = " India" if ".in" in site_domain else ""
-    search_query = f"{query} price {site_name}{region}"
-    ddg_url = f"https://html.duckduckgo.com/html/?q={quote_plus(search_query)}"
+async def _ddg_lite_search(query: str, site_domain: str, site_name: str, fallback_url: str) -> List[Product]:
+    """DuckDuckGo Lite — lightweight, works from cloud IPs."""
+    search_query = f"{query} price {site_name} India"
+    url = "https://lite.duckduckgo.com/lite/"
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=8) as client:
-            resp = await client.get(ddg_url, headers=_get_headers(1))
-        if resp.status_code != 200 or not resp.text[:20].isprintable():
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+            resp = await client.post(url, data={"q": search_query}, headers={
+                "User-Agent": _USER_AGENTS[1],
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "text/html",
+            })
+        if resp.status_code != 200:
             return []
         soup = BeautifulSoup(resp.text, "html.parser")
         products = []
         site_lower = site_name.lower()
-        for result in soup.select(".result, .web-result")[:8]:
-            title_el = result.select_one(".result__a, .result__title a")
-            snippet_el = result.select_one(".result__snippet")
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
-            href = title_el.get("href", fallback_url)
-            if "uddg=" in href:
-                href = unquote(href.split("uddg=")[1].split("&")[0])
-            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-            all_text = title + " " + snippet
-            if site_lower not in all_text.lower() and site_domain not in href:
-                continue
-            price = _parse_price(all_text)
-            if price > 0:
-                product_url = href if site_domain in href else fallback_url
-                products.append(Product(name=title[:100], price=price, url=product_url, site=site_name, rating=None))
+
+        # DDG Lite uses table rows with result links and snippet text
+        rows = soup.select("table")
+        for table in rows:
+            for link in table.select("a.result-link, td a[href^='http']"):
+                title = link.get_text(strip=True)
+                href = link.get("href", "")
+                if "duckduckgo.com" in href:
+                    continue
+                # Get surrounding text for price
+                parent_row = link.find_parent("tr")
+                snippet = ""
+                if parent_row:
+                    next_rows = parent_row.find_next_siblings("tr", limit=2)
+                    for nr in next_rows:
+                        snippet += " " + nr.get_text(strip=True)
+
+                all_text = title + " " + snippet
+                if site_lower not in all_text.lower() and site_domain not in href:
+                    continue
+
+                price = _parse_price(all_text)
+                if price > 0:
+                    product_url = href if site_domain in href else fallback_url
+                    products.append(Product(
+                        name=title[:100] if title else f"{site_name} {query}",
+                        price=price, url=product_url, site=site_name, rating=None
+                    ))
+
         if products:
             return products[:3]
     except Exception:
@@ -204,7 +276,7 @@ async def _ddg_search(query: str, site_domain: str, site_name: str, fallback_url
 
 
 async def _bing_search(query: str, site_domain: str, site_name: str, fallback_url: str) -> List[Product]:
-    """Bing often works from cloud IPs when Google/DDG block."""
+    """Bing as fallback."""
     search_query = f"{query} price site:{site_domain}"
     bing_url = f"https://www.bing.com/search?q={quote_plus(search_query)}&setlang=en&cc=IN"
     try:
@@ -227,7 +299,6 @@ async def _bing_search(query: str, site_domain: str, site_name: str, fallback_ur
             if price > 0:
                 products.append(Product(name=title[:100], price=price, url=href, site=site_name, rating=None))
 
-        # Also try Bing without site: — search for price mentions
         if not products:
             search_query2 = f"{query} price {site_name} India"
             bing_url2 = f"https://www.bing.com/search?q={quote_plus(search_query2)}&setlang=en&cc=IN"

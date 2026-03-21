@@ -359,7 +359,9 @@ _GROCERY_KW = {"milk", "bread", "rice", "dal", "sugar", "atta", "oil", "eggs", "
                "grocery", "groceries", "food", "drink", "beverages", "masala", "spice"}
 _ELECTRONICS_KW = {"phone", "mobile", "laptop", "tablet", "tv", "television", "headphone", "earbuds",
                    "camera", "watch", "smartwatch", "speaker", "monitor", "printer", "router",
-                   "iphone", "samsung", "pixel", "oneplus", "macbook", "ipad", "airpods", "galaxy"}
+                   "iphone", "samsung", "pixel", "oneplus", "macbook", "ipad", "airpods", "galaxy",
+                   "snapdragon", "processor", "chipset", "mediatek", "dimensity", "exynos", "bionic",
+                   "smartphone", "5g", "amoled", "oled"}
 _FASHION_KW = {"shirt", "tshirt", "jeans", "dress", "shoes", "sneakers", "jacket", "kurta", "saree",
                "kurti", "sandals", "heels", "handbag", "bag", "backpack", "sunglasses", "perfume",
                "makeup", "cosmetics", "lipstick", "foundation", "clothing", "fashion", "wear"}
@@ -397,14 +399,17 @@ def _filter_junk_prices(products, query: str):
 @app.post("/chatbot/compare", response_model=ComparisonResult)
 async def compare_endpoint(request: ComparisonRequest):
     try:
+        if not request.query or not request.query.strip():
+            raise HTTPException(status_code=400, detail="Please enter a product to search for.")
+        query = request.query.strip()[:200]  # Limit query length
         if request.sites:
             sites = request.sites
         else:
-            sites = _pick_sites(request.query)
+            sites = _pick_sites(query)
         
         async def _scrape_with_timeout(site):
             try:
-                return await asyncio.wait_for(SCRAPER_MAP[site](request.query), timeout=15)
+                return await asyncio.wait_for(SCRAPER_MAP[site](query), timeout=15)
             except (asyncio.TimeoutError, Exception):
                 return []
         
@@ -413,7 +418,7 @@ async def compare_endpoint(request: ComparisonRequest):
             raise HTTPException(status_code=400, detail="No valid e-commerce sites specified.")
         results = await asyncio.gather(*tasks)
         all_products = [p for sublist in results for p in sublist]
-        all_products = _filter_junk_prices(all_products, request.query)
+        all_products = _filter_junk_prices(all_products, query)
         if not all_products:
             raise HTTPException(status_code=404, detail="No products found.")
         best = compare_products(all_products)
@@ -429,7 +434,7 @@ async def compare_endpoint(request: ComparisonRequest):
 async def chat_endpoint(request: ChatRequest):
     try:
         history = [{"role": m.role, "content": m.content} for m in request.history] if request.history else None
-        reply = chat_with_ai(request.message, history)
+        reply = await chat_with_ai(request.message, history)
         return ChatResponse(reply=reply)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

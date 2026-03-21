@@ -2,6 +2,7 @@ import os
 from typing import List
 from models import Product
 
+
 def summarize_products(products: List[Product]) -> str:
     groq_key = os.environ.get("GROQ_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
@@ -45,7 +46,7 @@ def summarize_products(products: List[Product]) -> str:
         return "Could not determine best price. Please check the sites directly."
 
 
-def chat_with_ai(message: str, history: list = None) -> str:
+async def chat_with_ai(message: str, history: list = None) -> str:
     groq_key = os.environ.get("GROQ_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
 
@@ -53,6 +54,10 @@ def chat_with_ai(message: str, history: list = None) -> str:
         return "Sorry, AI chat is not available right now. Please set up a GROQ_API_KEY or OPENAI_API_KEY."
 
     try:
+        # Web search grounding — fetch current info from the web
+        from scrapers._google_helper import brave_web_search
+        web_context = await brave_web_search(message)
+
         from openai import OpenAI
 
         if groq_key:
@@ -62,10 +67,23 @@ def chat_with_ai(message: str, history: list = None) -> str:
             client = OpenAI(api_key=openai_key)
             model = "gpt-3.5-turbo"
 
-        system_msg = {
-            "role": "system",
-            "content": "You are SmartBot, ShopSmart's shopping assistant. Rules: 1) Give SHORT replies — 2-3 lines max with key info only. 2) End with 'Want detailed specs/comparison? Just ask!' when relevant. 3) Use bullet points for lists. 4) Be friendly and casual. 5) For prices say 'check the Compare tab for live prices'. 6) Never write long paragraphs."
-        }
+        system_content = (
+            "You are SmartBot, ShopSmart's shopping assistant. Rules: "
+            "1) Give SHORT replies — 2-3 lines max with key info only. "
+            "2) End with 'Want detailed specs/comparison? Just ask!' when relevant. "
+            "3) Use bullet points for lists. "
+            "4) Be friendly and casual. "
+            "5) For prices say 'check the Compare tab for live prices'. "
+            "6) Never write long paragraphs."
+        )
+        if web_context:
+            system_content += (
+                "\n\nIMPORTANT: Use the following CURRENT web search results to answer accurately. "
+                "Do NOT rely on your training data for recent product info.\n\n"
+                f"Web search results for \"{message}\":\n{web_context}"
+            )
+
+        system_msg = {"role": "system", "content": system_content}
 
         messages = [system_msg]
         if history:
@@ -76,7 +94,7 @@ def chat_with_ai(message: str, history: list = None) -> str:
         response = client.chat.completions.create(
             model=model,
             messages=messages,
-            max_tokens=150
+            max_tokens=250
         )
         return response.choices[0].message.content.strip()
     except Exception as e:

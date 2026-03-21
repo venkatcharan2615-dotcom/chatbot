@@ -11,6 +11,10 @@ import asyncio
 
 app = FastAPI()
 
+@app.get("/")
+async def root():
+    return {"message": "Chatbot API is running. Use POST /chatbot/compare to compare products."}
+
 SCRAPER_MAP = {
     "amazon": scrape_amazon,
     "flipkart": scrape_flipkart,

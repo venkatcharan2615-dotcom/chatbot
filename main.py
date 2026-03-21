@@ -364,6 +364,11 @@ _FASHION_KW = {"shirt", "tshirt", "jeans", "dress", "shoes", "sneakers", "jacket
                "kurti", "sandals", "heels", "handbag", "bag", "backpack", "sunglasses", "perfume",
                "makeup", "cosmetics", "lipstick", "foundation", "clothing", "fashion", "wear"}
 
+_EXPENSIVE_KW = {"phone", "mobile", "laptop", "tablet", "tv", "television", "monitor",
+                 "iphone", "samsung", "pixel", "oneplus", "macbook", "ipad", "galaxy",
+                 "refrigerator", "washing", "microwave", "ac", "air conditioner"}
+_MIN_PRICE_EXPENSIVE = 3000  # Phones/laptops won't be Rs 399
+
 def _pick_sites(query: str) -> list:
     """Pick relevant sites based on query keywords."""
     q_lower = query.lower().split()
@@ -375,11 +380,18 @@ def _pick_sites(query: str) -> list:
     if is_grocery and not is_electronics and not is_fashion:
         return list(GROCERY_SITES | GENERAL_SITES)
     if is_electronics and not is_grocery:
-        return list(ELECTRONICS_SITES | FASHION_SITES)  # Include fashion sites as they may carry accessories
+        return list(ELECTRONICS_SITES)  # Only electronics sites for electronics
     if is_fashion and not is_grocery:
         return list(FASHION_SITES | GENERAL_SITES | {"snapdeal", "tatacliq"})
     # Default: all non-grocery sites
     return [s for s in SCRAPER_MAP if s not in GROCERY_SITES]
+
+def _filter_junk_prices(products, query: str):
+    """Remove obviously wrong prices (e.g. Rs 399 for a phone = accessory)."""
+    q_words = set(query.lower().split())
+    if q_words & _EXPENSIVE_KW:
+        return [p for p in products if p.price == 0 or p.price >= _MIN_PRICE_EXPENSIVE]
+    return products
 
 
 @app.post("/chatbot/compare", response_model=ComparisonResult)
@@ -401,6 +413,7 @@ async def compare_endpoint(request: ComparisonRequest):
             raise HTTPException(status_code=400, detail="No valid e-commerce sites specified.")
         results = await asyncio.gather(*tasks)
         all_products = [p for sublist in results for p in sublist]
+        all_products = _filter_junk_prices(all_products, request.query)
         if not all_products:
             raise HTTPException(status_code=404, detail="No products found.")
         best = compare_products(all_products)

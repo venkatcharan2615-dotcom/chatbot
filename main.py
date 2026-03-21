@@ -144,8 +144,8 @@ async def root():
         </header>
 
         <div class="tabs">
-            <button class="tab active" onclick="switchTab('compare')">&#128269; Compare</button>
-            <button class="tab" onclick="switchTab('chat')">&#128172; Chat</button>
+            <button class="tab active" onclick="switchTab('compare', this)">&#128269; Compare</button>
+            <button class="tab" onclick="switchTab('chat', this)">&#128172; Chat</button>
         </div>
 
         <!-- COMPARE TAB -->
@@ -200,11 +200,11 @@ async def root():
     <script>
         let chatHistory = [];
 
-        function switchTab(tab) {
+        function switchTab(tab, btn) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
             document.getElementById('tab-' + tab).classList.add('active');
-            event.target.classList.add('active');
+            btn.classList.add('active');
             if (tab === 'chat') document.getElementById('chatInput').focus();
             if (tab === 'compare') document.getElementById('query').focus();
         }
@@ -219,11 +219,15 @@ async def root():
             loading.style.display = 'block';
             results.innerHTML = '';
             try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 90000);
                 const res = await fetch('/chatbot/compare', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({query: query})
+                    body: JSON.stringify({query: query}),
+                    signal: controller.signal
                 });
+                clearTimeout(timeoutId);
                 if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Request failed'); }
                 const data = await res.json();
                 const priced = data.all_products.filter(p => p.price > 0).sort((a,b) => a.price - b.price);
@@ -378,7 +382,14 @@ async def compare_endpoint(request: ComparisonRequest):
             sites = request.sites
         else:
             sites = _pick_sites(request.query)
-        tasks = [SCRAPER_MAP[site](request.query) for site in sites if site in SCRAPER_MAP]
+        
+        async def _scrape_with_timeout(site):
+            try:
+                return await asyncio.wait_for(SCRAPER_MAP[site](request.query), timeout=15)
+            except (asyncio.TimeoutError, Exception):
+                return []
+        
+        tasks = [_scrape_with_timeout(site) for site in sites if site in SCRAPER_MAP]
         if not tasks:
             raise HTTPException(status_code=400, detail="No valid e-commerce sites specified.")
         results = await asyncio.gather(*tasks)
@@ -386,7 +397,6 @@ async def compare_endpoint(request: ComparisonRequest):
         if not all_products:
             raise HTTPException(status_code=404, detail="No products found.")
         best = compare_products(all_products)
-        # Only send priced products to AI for better recommendations
         priced = [p for p in all_products if p.price > 0]
         summary = summarize_products(priced if priced else all_products)
         return ComparisonResult(best_product=best, all_products=all_products, summary=summary)

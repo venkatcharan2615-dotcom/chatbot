@@ -88,7 +88,7 @@ async def _google_search(query: str, site_domain: str, site_name: str, fallback_
     search_query = f"{query} price site:{site_domain}"
     google_url = f"https://www.google.com/search?q={quote_plus(search_query)}&hl=en&gl=in"
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=12) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=8) as client:
             resp = await client.get(google_url, headers=_get_headers(0))
         if resp.status_code != 200:
             return []
@@ -120,7 +120,7 @@ async def _ddg_search(query: str, site_domain: str, site_name: str, fallback_url
     search_query = f"{query} price {site_name}{region}"
     ddg_url = f"https://html.duckduckgo.com/html/?q={quote_plus(search_query)}"
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=12) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=8) as client:
             resp = await client.get(ddg_url, headers=_get_headers(1))
         if resp.status_code != 200 or not resp.text[:20].isprintable():
             return []
@@ -156,7 +156,7 @@ async def _bing_search(query: str, site_domain: str, site_name: str, fallback_ur
     search_query = f"{query} price site:{site_domain}"
     bing_url = f"https://www.bing.com/search?q={quote_plus(search_query)}&setlang=en&cc=IN"
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=12) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=8) as client:
             resp = await client.get(bing_url, headers=_get_headers(2))
         if resp.status_code != 200:
             return []
@@ -179,7 +179,7 @@ async def _bing_search(query: str, site_domain: str, site_name: str, fallback_ur
         if not products:
             search_query2 = f"{query} price {site_name} India"
             bing_url2 = f"https://www.bing.com/search?q={quote_plus(search_query2)}&setlang=en&cc=IN"
-            async with httpx.AsyncClient(follow_redirects=True, timeout=12) as client:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=8) as client:
                 resp2 = await client.get(bing_url2, headers=_get_headers(0))
             if resp2.status_code == 200:
                 soup2 = BeautifulSoup(resp2.text, "html.parser")
@@ -208,7 +208,7 @@ async def _bing_search(query: str, site_domain: str, site_name: str, fallback_ur
 async def _direct_scrape(query: str, site_domain: str, site_name: str, fallback_url: str) -> List[Product]:
     """Direct scraping with JSON-LD, meta tags, and text extraction."""
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=8) as client:
             resp = await client.get(fallback_url, headers=_get_headers(0))
         if resp.status_code >= 400:
             return []

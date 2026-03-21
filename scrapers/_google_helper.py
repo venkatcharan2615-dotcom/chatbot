@@ -27,6 +27,52 @@ _DISCOUNT_CONTEXT = re.compile(
     re.IGNORECASE
 )
 
+# Accessory keywords to filter out from results
+_ACCESSORY_WORDS = re.compile(
+    r"\b(case|cover|pouch|sleeve|skin|protector|tempered\s*glass|screen\s*guard|"
+    r"charger|cable|adapter|holder|stand|mount|strap|band|loop|sticker|decal|"
+    r"back\s*cover|flip\s*cover|bumper|armor|wallet\s*case)\b",
+    re.IGNORECASE
+)
+
+# Product type detection for smarter search queries
+_PHONE_BRANDS = {"iphone", "samsung", "pixel", "oneplus", "redmi", "realme", "poco",
+                 "vivo", "oppo", "motorola", "moto", "nothing", "iqoo", "galaxy"}
+_LAPTOP_WORDS = {"laptop", "macbook", "chromebook", "notebook"}
+_WATCH_WORDS = {"watch", "smartwatch", "band"}
+_TV_WORDS = {"tv", "television"}
+_TABLET_WORDS = {"ipad", "tablet"}
+
+
+def _refine_query(query: str) -> str:
+    """Add product type to query for more accurate results."""
+    q_lower = query.lower()
+    words = set(q_lower.split())
+
+    # Already has a type word — don't add
+    type_words = {"phone", "mobile", "smartphone", "laptop", "watch", "smartwatch",
+                  "tv", "television", "tablet", "earbuds", "headphone", "speaker",
+                  "case", "cover", "charger"}
+    if words & type_words:
+        return query
+
+    if words & _PHONE_BRANDS:
+        return query + " smartphone"
+    if words & _LAPTOP_WORDS:
+        return query + " laptop"
+    if words & _WATCH_WORDS:
+        return query + " smartwatch"
+    if words & _TV_WORDS:
+        return query + " television"
+    if words & _TABLET_WORDS:
+        return query + " tablet"
+    return query
+
+
+def _is_accessory(title: str) -> bool:
+    """Check if a product title is an accessory (case, cover, etc.)."""
+    return bool(_ACCESSORY_WORDS.search(title))
+
 
 def _parse_price(text: str) -> float:
     discount_amounts = set()
@@ -55,6 +101,8 @@ async def google_price_search(query: str, site_domain: str, site_name: str, fall
     """Try multiple search engines in parallel to get real product prices."""
     import asyncio
 
+    refined = _refine_query(query)
+
     async def _try_strategy(coro):
         try:
             return await coro
@@ -63,13 +111,18 @@ async def google_price_search(query: str, site_domain: str, site_name: str, fall
 
     # Run all strategies in parallel — first one with results wins
     results = await asyncio.gather(
-        _try_strategy(_google_search(query, site_domain, site_name, fallback_url)),
-        _try_strategy(_ddg_search(query, site_domain, site_name, fallback_url)),
-        _try_strategy(_bing_search(query, site_domain, site_name, fallback_url)),
+        _try_strategy(_google_search(refined, site_domain, site_name, fallback_url)),
+        _try_strategy(_ddg_search(refined, site_domain, site_name, fallback_url)),
+        _try_strategy(_bing_search(refined, site_domain, site_name, fallback_url)),
         _try_strategy(_direct_scrape(query, site_domain, site_name, fallback_url)),
     )
 
     for products in results:
+        # Filter out accessories
+        filtered = [p for p in products if not _is_accessory(p.name)]
+        if filtered:
+            return filtered
+        # If all results are accessories, still return them (user might want accessories)
         if products:
             return products
 

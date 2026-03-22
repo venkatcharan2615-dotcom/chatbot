@@ -1,42 +1,32 @@
 from models import Product
 from typing import List, Dict, Set
-import httpx
-from urllib.parse import quote_plus
-from bs4 import BeautifulSoup
 import re
-import json
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote_plus
 
-# ---------------------------------------------------------------------------
-#  User-Agent rotation
-# ---------------------------------------------------------------------------
-_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-]
+# DDGS package — handles DDG's anti-bot measures properly
+try:
+    from ddgs import DDGS
+except ImportError:
+    from duckduckgo_search import DDGS
 
-def _get_headers(idx=0):
-    return {
-        "User-Agent": _USER_AGENTS[idx % len(_USER_AGENTS)],
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
-        "DNT": "1",
-        "Upgrade-Insecure-Requests": "1",
-    }
+_executor = ThreadPoolExecutor(max_workers=3)
 
 # ---------------------------------------------------------------------------
 #  Price parsing
 # ---------------------------------------------------------------------------
 _PRICE_RE = re.compile(r"(?:₹|Rs\.?\s*|INR\s*)([\d,]+(?:\.[\d]+)?)")
-_DISCOUNT_CONTEXT = re.compile(
-    r"(?:discount|cut|drop|off|save|cashback|exchange|slashed)[\s\w]{0,15}?(?:₹|Rs\.?\s*|INR\s*)([\d,]+)",
-    re.IGNORECASE,
-)
 
 def _parse_price(text: str) -> float:
+    """Extract median price from text, ignoring discount/cashback amounts."""
+    discount_ctx = re.compile(
+        r"(?:discount|cut|drop|off|save|cashback|exchange|slashed|down by)[\s\w]{0,15}?"
+        r"(?:₹|Rs\.?\s*|INR\s*)([\d,]+)", re.IGNORECASE,
+    )
     discount_amounts = set()
-    for m in _DISCOUNT_CONTEXT.findall(text):
+    for m in discount_ctx.findall(text):
         try:
             discount_amounts.add(float(m.replace(",", "")))
         except ValueError:
@@ -54,6 +44,66 @@ def _parse_price(text: str) -> float:
         return 0
     prices.sort()
     return prices[len(prices) // 2]
+
+
+def _extract_price_near_store(text: str, store_lower: str) -> float:
+    """Find a price that appears within ~80 chars of a store name mention.
+
+    Skips amounts that appear in discount/savings context (e.g. 'Rs 9,901 discount').
+    """
+    _DISCOUNT_NEAR = re.compile(
+        r"(?:discount|off|save|cashback|drop(?:s|ped)?(?:\s+(?:by|to))?\s+(?:over\s+)?(?:Rs\.?\s*|₹|INR\s*)"
+        r"|(?:Rs\.?\s*|₹|INR\s*)[\d,]+\s*(?:discount|off|cashback|cheaper))",
+        re.IGNORECASE,
+    )
+    t_lower = text.lower()
+    idx = 0
+    candidates = []
+    while True:
+        pos = t_lower.find(store_lower, idx)
+        if pos < 0:
+            break
+        # Window around the store mention
+        start = max(0, pos - 120)
+        end = min(len(text), pos + len(store_lower) + 120)
+        window = text[start:end]
+
+        # Collect discount amounts in this window to exclude them
+        discount_amounts = set()
+        # Pattern: "discount/off/save... Rs X" and "discount of up to Rs X"
+        for dm in re.findall(r"(?:discount|off|save|cashback|drop\w*\s+(?:by|of|to)\s+(?:over\s+|up\s+to\s+)?)"
+                             r"(?:Rs\.?\s*|₹|INR\s*)([\d,]+)", window, re.IGNORECASE):
+            try:
+                discount_amounts.add(float(dm.replace(",", "")))
+            except ValueError:
+                pass
+        # Pattern: "Rs X discount/off/cashback/cheaper"
+        for dm in re.findall(r"(?:Rs\.?\s*|₹|INR\s*)([\d,]+)\s*(?:discount|off|cashback|cheaper)",
+                             window, re.IGNORECASE):
+            try:
+                discount_amounts.add(float(dm.replace(",", "")))
+            except ValueError:
+                pass
+        # Pattern: "up to Rs X discount/off" or "upto Rs X off"
+        for dm in re.findall(r"up\s*to\s+(?:Rs\.?\s*|₹|INR\s*)([\d,]+)\s*(?:discount|off)?",
+                             window, re.IGNORECASE):
+            try:
+                discount_amounts.add(float(dm.replace(",", "")))
+            except ValueError:
+                pass
+
+        for m in _PRICE_RE.findall(window):
+            try:
+                p = float(m.replace(",", ""))
+                if 500 < p < 10_000_000 and p not in discount_amounts:
+                    candidates.append(p)
+            except ValueError:
+                pass
+        idx = pos + 1
+    if not candidates:
+        return 0
+    candidates.sort()
+    return candidates[len(candidates) // 2]
 
 # ---------------------------------------------------------------------------
 #  Accessory / product-type detection
@@ -95,42 +145,19 @@ def _is_accessory(title: str) -> bool:
     return bool(_ACCESSORY_WORDS.search(title))
 
 # ---------------------------------------------------------------------------
-#  URL classification
+#  URL / domain classification
 # ---------------------------------------------------------------------------
-_NEWS_DOMAINS = {
-    "timesofindia", "indiatimes.com", "news18", "hindustantimes",
-    "indianexpress", "youtube.com", "quora.com", "reddit.com",
-    "twitter.com", "facebook.com", "gizmochina", "tomsguide",
-    "techradar", "digit.in", "compareraja",
-}
-_TRUSTED_PRICE_SITES = {
-    "91mobiles", "smartprix", "mysmartprice", "gadgets360",
-    "pricebefore", "pricedekho", "gsmarena",
+# Only filter truly irrelevant sites (social, video, forums)
+# DO NOT filter news/tech sites — they contain price information!
+_JUNK_DOMAINS = {
+    "youtube.com", "quora.com", "reddit.com", "twitter.com", "facebook.com",
+    "instagram.com", "pinterest.com", "tiktok.com",
+    "zhihu.com", "android-hilfe.de", "ctiforum.com", "syzer.com.br",
 }
 
-def _is_news_url(href: str) -> bool:
+def _is_junk_url(href: str) -> bool:
     h = href.lower()
-    return any(nd in h for nd in _NEWS_DOMAINS)
-
-def _is_trusted_price_site(href: str) -> bool:
-    h = href.lower()
-    return any(ts in h for ts in _TRUSTED_PRICE_SITES)
-
-# ---------------------------------------------------------------------------
-#  Title cleaning (Brave prefixes / breadcrumbs)
-# ---------------------------------------------------------------------------
-def _clean_brave_title(title: str, site_name: str) -> str:
-    title = re.sub(
-        r'^[A-Za-z0-9]+(?:\.[a-z0-9]+)*\.(?:com|in|org|net)[›\s]+(?:[^›]+[›\s]+)*',
-        '', title,
-    ).strip()
-    title = re.sub(r'^\d{2}:\d{2}YouTube', '', title).strip()
-    for prefix in [site_name, "Times of India", "YouTube", "My Mobile India",
-                   "Gadgets360", "Smartprix", "91mobiles"]:
-        if title.startswith(prefix):
-            title = title[len(prefix):].strip()
-    title = re.sub(r'^[›\-\|:]+\s*', '', title).strip()
-    return title if title else f"{site_name} product"
+    return any(nd in h for nd in _JUNK_DOMAINS)
 
 # ---------------------------------------------------------------------------
 #  Site configuration (domain ↔ display name ↔ search URL)
@@ -157,19 +184,15 @@ def _fallback_url(key: str, query: str) -> str:
     return cfg["tpl"].format(q=quote_plus(query), qh=query.replace(" ", "-"))
 
 # ===================================================================
-#  BATCH SEARCH — main entry point for price comparison
-#  ONE search covers ALL sites → dramatically fewer HTTP requests
+#  BATCH SEARCH — main entry point
+#  Strategy: Mine DDGS snippets for store+price pairs
 # ===================================================================
 
 async def batch_search_all_sites(query: str, site_keys: List[str]) -> List[Product]:
-    """Search for product prices across multiple sites using minimal HTTP requests.
-
-    OLD approach: 4 strategies × 4 sites = 16+ HTTP requests → rate limiting
-    NEW approach: 1 Brave + 1 DDG + 0-2 Bing = 2-4 HTTP requests total
-    """
+    """Search for product prices across multiple sites using DDGS snippet mining."""
     refined = _refine_query(query)
 
-    # Build domain → config lookup for requested sites
+    # Build config for requested sites
     sites: Dict[str, dict] = {}
     for key in site_keys:
         cfg = _SITE_CONFIG.get(key)
@@ -179,309 +202,245 @@ async def batch_search_all_sites(query: str, site_keys: List[str]) -> List[Produ
                 "display": cfg["display"],
                 "fallback": _fallback_url(key, query),
             }
-
     if not sites:
         return []
 
-    all_products: List[Product] = []
-    found_sites: Set[str] = set()
-
-    # --- Strategy 1: ONE Brave search (covers all sites at once) ---
+    # --- Strategy 1: DDGS snippet mining (fast, reliable) ---
+    ddgs_results = {}
     try:
-        brave_prods = await asyncio.wait_for(
-            _brave_multi_search(refined, sites), timeout=12,
+        ddgs_results = await asyncio.wait_for(
+            _ddgs_mine_prices(refined, query, sites), timeout=20,
         )
-        for p in brave_prods:
-            if not _is_accessory(p.name):
-                all_products.append(p)
-                if p.price > 0:
-                    found_sites.add(p.site)
-    except (asyncio.TimeoutError, Exception):
+    except (asyncio.TimeoutError, BaseException):
         pass
 
-    # --- Strategy 2: ONE DDG Lite search for missing sites ---
-    missing = {d: c for d, c in sites.items() if c["display"] not in found_sites}
-    if missing:
-        try:
-            ddg_prods = await asyncio.wait_for(
-                _ddg_multi_search(refined, missing), timeout=12,
-            )
-            for p in ddg_prods:
-                if not _is_accessory(p.name):
-                    all_products.append(p)
-                    if p.price > 0:
-                        found_sites.add(p.site)
-        except (asyncio.TimeoutError, Exception):
-            pass
+    found_sites: Set[str] = set()
+    all_products: List[Product] = []
 
-    # --- Strategy 3: Bing for still-missing (max 2 requests) ---
-    still_missing = {d: c for d, c in sites.items() if c["display"] not in found_sites}
-    bing_domains = list(still_missing.keys())[:2]
-    if bing_domains:
-        async def _try_bing(domain):
-            try:
-                cfg = still_missing[domain]
-                return await _bing_search(refined, domain, cfg["display"], cfg["fallback"])
-            except Exception:
-                return []
+    # First pass: compute per-site median price
+    site_prices: Dict[str, float] = {}
+    for display, info in ddgs_results.items():
+        prices = info["prices"]
+        if prices:
+            prices.sort()
+            median = prices[len(prices) // 2]
+            filtered = [p for p in prices if median / 5 <= p <= median * 5]
+            if filtered:
+                filtered.sort()
+                site_prices[display] = filtered[len(filtered) // 2]
+            else:
+                site_prices[display] = median
 
-        bing_results = await asyncio.gather(*[_try_bing(d) for d in bing_domains])
-        for domain, prods in zip(bing_domains, bing_results):
-            cfg = still_missing[domain]
-            for p in prods:
-                if not _is_accessory(p.name):
-                    all_products.append(p)
-                    if p.price > 0:
-                        found_sites.add(cfg["display"])
+    # Cross-site outlier filter: if a site's price is >8x away from the
+    # cross-site median, it's likely a wrong product (accessory, etc.)
+    if len(site_prices) >= 2:
+        cross_vals = sorted(site_prices.values())
+        cross_median = cross_vals[len(cross_vals) // 2]
+        for display in list(site_prices):
+            p = site_prices[display]
+            if p < cross_median / 8 or p > cross_median * 8:
+                del site_prices[display]
 
-    # --- Fallback entries for sites with zero results ---
-    for domain, cfg in sites.items():
-        if cfg["display"] not in found_sites:
+    for display, info in ddgs_results.items():
+        url = info["url"]
+        title = info["title"]
+        if display in site_prices:
             all_products.append(Product(
-                name=f"{cfg['display']} {query}",
-                price=0,
-                url=cfg["fallback"],
-                site=cfg["display"],
-                rating=None,
-                details=f"Click to search on {cfg['display']}",
+                name=title, price=site_prices[display], url=url, site=display, rating=None,
+            ))
+            found_sites.add(display)
+        elif url != info.get("fallback", ""):
+            # Have a direct URL but no price — still useful
+            all_products.append(Product(
+                name=title, price=0, url=url, site=display, rating=None,
+            ))
+
+    # --- Fallback entries for sites that still have zero results ---
+    for domain, cfg in sites.items():
+        if cfg["display"] not in {p.site for p in all_products}:
+            all_products.append(Product(
+                name=f"{cfg['display']} – Search for {query}",
+                price=0, url=cfg["fallback"], site=cfg["display"],
+                rating=None, details=f"Click to search on {cfg['display']}",
             ))
 
     return all_products
 
+
 # ===================================================================
-#  BRAVE — single search, multi-site extraction
+#  DDGS SNIPPET MINING — extract store+price pairs from ALL results
 # ===================================================================
 
-async def _brave_multi_search(query: str, sites: Dict[str, dict]) -> List[Product]:
-    """ONE Brave search — extract prices for ALL target sites at once."""
-    search_query = f"{query} price buy online India"
-    url = "https://search.brave.com/search"
+def _ddgs_mine_prices_sync(query: str, original_query: str, sites: Dict[str, dict]) -> dict:
+    """Mine DDGS search snippets for store+price pairs.
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
-        resp = await client.get(url, params={"q": search_query, "country": "in"}, headers={
-            "User-Agent": _USER_AGENTS[0],
-            "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "en-IN,en;q=0.9",
-        })
-    if resp.status_code != 200:
-        return []
+    Instead of matching results 1:1 to stores, we scan ALL snippets
+    for mentions of each store near a price. This catches price data
+    from news articles, deal sites, comparison sites, etc.
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    products: List[Product] = []
-    per_site_count: Dict[str, int] = {}  # max 3 results per site
+    Returns: {display_name: {"prices": [...], "url": best_url, "title": title, "fallback": url}}
+    """
+    site_names = " ".join(cfg["display"] for cfg in sites.values())
 
-    for r in soup.select("#results .snippet, [data-type='web']")[:15]:
-        title_el = r.select_one(".snippet-title, .title, h2 a, a")
-        desc_el = r.select_one(".snippet-description, .snippet-content, .description")
-        url_el = r.select_one("a[href^='http']")
+    # Four complementary queries to maximize price coverage
+    queries = [
+        f"{query} price India {site_names}",
+        f"{query} price Rs buy online India",
+        f"{query} lowest price best deal India {site_names}",
+        f"{original_query} buy online Rs price",
+    ]
 
-        title = title_el.get_text(strip=True) if title_el else ""
-        desc = desc_el.get_text(strip=True) if desc_el else ""
-        href = url_el.get("href", "") if url_el else ""
-        all_text = title + " " + desc
+    # Collect all raw results using daemon threads (so hung queries don't block)
+    all_results = []
+    for search_q in queries:
+        batch = []
+        def _run(q=search_q, out=batch):
+            try:
+                out.extend(DDGS(timeout=5).text(q, region="in-en", max_results=12))
+            except Exception:
+                pass
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=8)  # Hard per-query timeout
+        all_results.extend(batch)
 
-        if _is_news_url(href):
+    # Per-site tracking
+    site_data: Dict[str, dict] = {}
+    for domain, cfg in sites.items():
+        site_data[cfg["display"]] = {
+            "prices": [],
+            "url": cfg["fallback"],  # default to search URL
+            "title": f"{original_query} on {cfg['display']}",
+            "fallback": cfg["fallback"],
+            "domain": domain,
+        }
+
+    seen_hrefs: Set[str] = set()
+    # Build relevance check: significant query words
+    # Include numbers (e.g. "15" in "iPhone 15") and words > 2 chars
+    _STOP = {"price", "india", "online", "buy", "best", "search", "new", "the", "for", "and", "with"}
+    query_sig = [w for w in original_query.lower().split()
+                 if (len(w) > 2 and w not in _STOP) or w.isdigit()]
+
+    for r in all_results:
+        title = r.get("title", "")
+        href = r.get("href", "")
+        body = r.get("body", "")
+
+        # De-duplicate results across queries
+        if href in seen_hrefs:
+            continue
+        seen_hrefs.add(href)
+
+        # Skip social/video
+        if _is_junk_url(href):
             continue
 
-        price = _parse_price(all_text)
-        if price <= 0:
-            continue
+        all_text = title + " " + body
+        text_lower = all_text.lower()
 
-        # Determine which target site this result belongs to
-        matched_cfg = None
+        # Relevance check: does this result mention significant query words?
+        relevance = sum(1 for w in query_sig if w in text_lower) if query_sig else 1
+        is_relevant = relevance >= max(1, len(query_sig) // 2)
 
-        # Tier 1: Direct product URL (amazon.in, flipkart.com, etc.)
+        # Collect store mentions with their positions for disambiguation
+        snippet_store_prices: Dict[str, list] = {}  # display -> [(price, position)]
+
         for domain, cfg in sites.items():
-            if domain in href:
-                matched_cfg = cfg
-                break
+            display = cfg["display"]
+            display_lower = display.lower()
+            info = site_data[display]
 
-        # Tier 2: Trusted comparison site mentioning a target store name
-        if not matched_cfg and _is_trusted_price_site(href):
-            all_lower = all_text.lower()
-            for domain, cfg in sites.items():
-                if cfg["display"].lower() in all_lower:
-                    matched_cfg = cfg
-                    break
+            is_direct = domain in href
+            is_mentioned = display_lower in text_lower
 
-        if not matched_cfg:
-            continue
-
-        display = matched_cfg["display"]
-        if per_site_count.get(display, 0) >= 3:
-            continue
-        per_site_count[display] = per_site_count.get(display, 0) + 1
-
-        product_url = href if any(d in href for d in sites) else matched_cfg["fallback"]
-        clean_title = _clean_brave_title(title, display) if title else f"{display} {query}"
-
-        products.append(Product(
-            name=clean_title[:100], price=price, url=product_url,
-            site=display, rating=None,
-        ))
-
-    return products
-
-# ===================================================================
-#  DDG LITE — single search, multi-site extraction
-# ===================================================================
-
-async def _ddg_multi_search(query: str, sites: Dict[str, dict]) -> List[Product]:
-    """ONE DDG Lite search — extract prices for multiple sites."""
-    search_query = f"{query} price buy online India"
-    url = "https://lite.duckduckgo.com/lite/"
-
-    async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
-        resp = await client.post(url, data={"q": search_query}, headers={
-            "User-Agent": _USER_AGENTS[1],
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "text/html",
-        })
-    if resp.status_code != 200:
-        return []
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    products: List[Product] = []
-    per_site_count: Dict[str, int] = {}
-
-    for table in soup.select("table"):
-        for link in table.select("a.result-link, td a[href^='http']"):
-            title = link.get_text(strip=True)
-            href = link.get("href", "")
-            if "duckduckgo.com" in href or _is_news_url(href):
+            if not is_direct and not is_mentioned:
                 continue
 
-            parent_row = link.find_parent("tr")
-            snippet = ""
-            if parent_row:
-                for nr in parent_row.find_next_siblings("tr", limit=2):
-                    snippet += " " + nr.get_text(strip=True)
+            # Direct e-commerce URL — save as best URL (prefer product pages over search)
+            if is_direct and info["url"] == info["fallback"]:
+                if not _is_accessory(title) and is_relevant:
+                    info["url"] = href
+                    if title:
+                        clean = title[:100]
+                        for prefix in ["Amazon.in: ", "Buy ", "Flipkart: "]:
+                            if clean.startswith(prefix):
+                                clean = clean[len(prefix):]
+                        info["title"] = clean
 
-            all_text = title + " " + snippet
-            price = _parse_price(all_text)
-            if price <= 0:
+            # Skip price extraction from irrelevant results
+            if not is_relevant:
                 continue
 
-            matched_cfg = None
-            for domain, cfg in sites.items():
-                if domain in href:
-                    matched_cfg = cfg
-                    break
-            if not matched_cfg and _is_trusted_price_site(href):
-                all_lower = all_text.lower()
-                for domain, cfg in sites.items():
-                    if cfg["display"].lower() in all_lower:
-                        matched_cfg = cfg
-                        break
-
-            if not matched_cfg:
-                continue
-
-            display = matched_cfg["display"]
-            if per_site_count.get(display, 0) >= 3:
-                continue
-            per_site_count[display] = per_site_count.get(display, 0) + 1
-
-            product_url = href if any(d in href for d in sites) else matched_cfg["fallback"]
-            products.append(Product(
-                name=title[:100] if title else f"{display} {query}",
-                price=price, url=product_url, site=display, rating=None,
-            ))
-
-    return products
-
-# ===================================================================
-#  BING — per-site fallback (used only for 1-2 still-missing sites)
-# ===================================================================
-
-async def _bing_search(query: str, site_domain: str, site_name: str, fallback_url: str) -> List[Product]:
-    search_query = f"{query} price site:{site_domain}"
-    bing_url = f"https://www.bing.com/search?q={quote_plus(search_query)}&setlang=en&cc=IN"
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=8) as client:
-            resp = await client.get(bing_url, headers=_get_headers(2))
-        if resp.status_code != 200:
-            return []
-        soup = BeautifulSoup(resp.text, "html.parser")
-        products = []
-        for result in soup.select("li.b_algo, .b_algo")[:5]:
-            title_el = result.select_one("h2 a, h2")
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
-            href = title_el.get("href", "")
-            if not href or site_domain not in href:
-                continue
-            all_text = result.get_text(" ", strip=True)
-            price = _parse_price(all_text)
+            # Extract price near this store's mention
+            price = _extract_price_near_store(all_text, display_lower)
             if price > 0:
-                products.append(Product(
-                    name=title[:100], price=price, url=href,
-                    site=site_name, rating=None,
-                ))
-        if products:
-            return products[:3]
+                # Find position of closest store mention for disambiguation
+                pos = text_lower.find(display_lower)
+                snippet_store_prices[display] = (price, pos if pos >= 0 else 9999)
 
-        # Broader query without site: operator
-        search_query2 = f"{query} price {site_name} India"
-        bing_url2 = f"https://www.bing.com/search?q={quote_plus(search_query2)}&setlang=en&cc=IN"
-        async with httpx.AsyncClient(follow_redirects=True, timeout=8) as client:
-            resp2 = await client.get(bing_url2, headers=_get_headers(0))
-        if resp2.status_code != 200:
-            return []
-        soup2 = BeautifulSoup(resp2.text, "html.parser")
-        direct = []
-        comparison = []
-        for result in soup2.select("li.b_algo, .b_algo")[:6]:
-            title_el = result.select_one("h2 a, h2")
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
-            href = title_el.get("href", "")
-            snippet = result.get_text(" ", strip=True)
-            price = _parse_price(snippet)
-            if price <= 0:
-                continue
-            if site_domain in href and not _is_news_url(href):
-                direct.append(Product(
-                    name=title[:100], price=price, url=href,
-                    site=site_name, rating=None,
-                ))
-            elif _is_trusted_price_site(href) and site_name.lower() in snippet.lower():
-                comparison.append(Product(
-                    name=title[:100], price=price, url=fallback_url,
-                    site=site_name, rating=None,
-                ))
-        return (direct or comparison)[:3]
-    except Exception:
-        return []
+        # Disambiguation: if multiple stores in the same snippet got the exact
+        # same price, only assign it to the store whose name is closest to a
+        # price token in the text — the others are likely reading the same number.
+        if len(snippet_store_prices) > 1:
+            prices_seen: Dict[float, list] = {}
+            for disp, (pr, pos) in snippet_store_prices.items():
+                prices_seen.setdefault(pr, []).append((disp, pos))
+
+            for pr, stores_pos in prices_seen.items():
+                if len(stores_pos) > 1:
+                    # Multiple stores got the same price from this snippet.
+                    # Find which store mention is closest to a price mention.
+                    price_positions = [m.start() for m in _PRICE_RE.finditer(all_text)]
+                    if price_positions:
+                        best_store = min(
+                            stores_pos,
+                            key=lambda sp: min(abs(sp[1] - pp) for pp in price_positions),
+                        )
+                        # Only keep the closest store; remove duplicates
+                        for disp, pos in stores_pos:
+                            if disp != best_store[0]:
+                                del snippet_store_prices[disp]
+
+        # Now add the surviving prices
+        for display, (price, _pos) in snippet_store_prices.items():
+            site_data[display]["prices"].append(price)
+
+    return site_data
+
+
+async def _ddgs_mine_prices(query: str, original_query: str, sites: Dict[str, dict]) -> dict:
+    """Async wrapper — runs sync DDGS in thread pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _executor, _ddgs_mine_prices_sync, query, original_query, sites,
+    )
 
 # ===================================================================
-#  LEGACY — kept for backward compatibility with individual scrapers
+#  LEGACY — kept for backward compatibility (grocery scrapers etc.)
 # ===================================================================
 
 async def google_price_search(query: str, site_domain: str, site_name: str, fallback_url: str) -> List[Product]:
-    """Legacy single-site search. Prefer batch_search_all_sites for multi-site."""
+    """Single-site search using DDGS snippet mining."""
     refined = _refine_query(query)
+    sites = {site_domain: {"key": site_name.lower(), "display": site_name, "fallback": fallback_url}}
 
-    async def _try(coro):
-        try:
-            return await coro
-        except Exception:
-            return []
-
-    # Use DDG + Bing (save Brave for batch search to avoid rate limits)
-    results = await asyncio.gather(
-        _try(_ddg_single_search(refined, site_domain, site_name, fallback_url)),
-        _try(_bing_search(refined, site_domain, site_name, fallback_url)),
-    )
-
-    for products in results:
-        filtered = [p for p in products if not _is_accessory(p.name)]
-        if filtered:
-            return filtered
-        if products:
-            return products
+    try:
+        result = await asyncio.wait_for(
+            _ddgs_mine_prices(refined, query, sites), timeout=15,
+        )
+        info = result.get(site_name, {})
+        prices = info.get("prices", [])
+        if prices:
+            prices.sort()
+            return [Product(
+                name=info.get("title", f"{site_name} {query}"),
+                price=prices[len(prices) // 2],
+                url=info.get("url", fallback_url),
+                site=site_name, rating=None,
+            )]
+    except (asyncio.TimeoutError, BaseException):
+        pass
 
     return [Product(
         name=f"{site_name} {query}", price=0, url=fallback_url,
@@ -489,71 +448,31 @@ async def google_price_search(query: str, site_domain: str, site_name: str, fall
         details=f"Click to search on {site_name}",
     )]
 
-
-async def _ddg_single_search(query: str, site_domain: str, site_name: str, fallback_url: str) -> List[Product]:
-    """DDG Lite search for a single site (legacy)."""
-    search_query = f"{query} price {site_name} India"
-    url = "https://lite.duckduckgo.com/lite/"
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
-            resp = await client.post(url, data={"q": search_query}, headers={
-                "User-Agent": _USER_AGENTS[1],
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "text/html",
-            })
-        if resp.status_code != 200:
-            return []
-        soup = BeautifulSoup(resp.text, "html.parser")
-        products = []
-        for table in soup.select("table"):
-            for link in table.select("a.result-link, td a[href^='http']"):
-                title = link.get_text(strip=True)
-                href = link.get("href", "")
-                if "duckduckgo.com" in href or _is_news_url(href):
-                    continue
-                parent_row = link.find_parent("tr")
-                snippet = ""
-                if parent_row:
-                    for nr in parent_row.find_next_siblings("tr", limit=2):
-                        snippet += " " + nr.get_text(strip=True)
-                all_text = title + " " + snippet
-                if site_domain not in href:
-                    continue
-                price = _parse_price(all_text)
-                if price > 0:
-                    products.append(Product(
-                        name=title[:100], price=price, url=href,
-                        site=site_name, rating=None,
-                    ))
-        return products[:3]
-    except Exception:
-        return []
-
 # ===================================================================
-#  BRAVE WEB SEARCH — for chat grounding
+#  WEB SEARCH — for chat grounding
 # ===================================================================
+
+def _web_search_sync(query: str) -> str:
+    """Synchronous web search for chat AI grounding."""
+    results_holder = []
+    def _run():
+        try:
+            results_holder.extend(DDGS(timeout=5).text(query, region="in-en", max_results=5))
+        except Exception:
+            pass
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=8)
+    snippets = []
+    for r in results_holder:
+        title = r.get("title", "")
+        body = r.get("body", "")
+        if title:
+            snippets.append(f"- {title}: {body[:150]}" if body else f"- {title}")
+    return "\n".join(snippets)
+
 
 async def brave_web_search(query: str) -> str:
-    """Search the web via Brave and return text snippets for AI grounding."""
-    url = "https://search.brave.com/search"
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
-            resp = await client.get(url, params={"q": query, "country": "in"}, headers={
-                "User-Agent": _USER_AGENTS[0],
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "en-IN,en;q=0.9",
-            })
-        if resp.status_code != 200:
-            return ""
-        soup = BeautifulSoup(resp.text, "html.parser")
-        snippets = []
-        for r in soup.select("#results .snippet, [data-type='web']")[:6]:
-            title_el = r.select_one(".snippet-title, .title, h2, a")
-            desc_el = r.select_one(".snippet-description, .snippet-content, .description")
-            title = title_el.get_text(strip=True) if title_el else ""
-            desc = desc_el.get_text(strip=True) if desc_el else ""
-            if title:
-                snippets.append(f"- {title}: {desc}" if desc else f"- {title}")
-        return "\n".join(snippets[:5])
-    except Exception:
-        return ""
+    """Search the web and return text snippets for AI grounding."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, _web_search_sync, query)

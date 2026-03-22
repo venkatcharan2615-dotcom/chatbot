@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+.DS_Store
+.idea/
+.vscode/
+.venv/
+test_*.py
+_test_*.py
+_debug*.py
+debug_*.html
+test_http_output.txt
+scrapers/_google_helper_backup.py
+scrapers/_google_helper_new.py

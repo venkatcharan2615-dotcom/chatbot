@@ -74,6 +74,7 @@ async def root():
         .compare-table .site-cell { white-space: nowrap; }
         .compare-table .site-pill { display: inline-block; background: rgba(99,102,241,0.15); color: #a5b4fc; padding: 4px 12px; border-radius: 6px; font-size: 0.8rem; font-weight: 600; }
         .compare-table .name-cell { color: #cbd5e1; line-height: 1.4; max-width: 350px; }
+        .compare-table .detail-cell { display: block; margin-top: 0.35rem; color: #94a3b8; font-size: 0.8rem; }
         .compare-table .price-cell { font-weight: 700; font-size: 1.05rem; color: #4ade80; white-space: nowrap; }
         .compare-table .action-cell { text-align: center; }
         .compare-table .visit-btn { display: inline-block; padding: 6px 16px; border-radius: 8px; background: rgba(99,102,241,0.15); color: #818cf8; text-decoration: none; font-size: 0.8rem; font-weight: 600; transition: all 0.15s; border: 1px solid rgba(99,102,241,0.2); }
@@ -266,12 +267,14 @@ async def root():
                         const isBest = i === 0;
                         const safeSite = escapeHtml(p.site);
                         const safeName = escapeHtml(p.name);
+                        const safeDetails = escapeHtml(p.details || '');
                         const safeHref = safeUrl(p.url);
                         html += '<tr class="' + (isBest ? 'best-row' : '') + '">';
                         html += '<td class="rank">' + (i+1) + '</td>';
                         html += '<td class="site-cell"><span class="site-pill">' + safeSite + '</span></td>';
                         html += '<td class="name-cell">' + safeName;
                         if (isBest) html += '<span class="best-tag">&#9733; Best Price</span>';
+                        if (safeDetails) html += '<span class="detail-cell">' + safeDetails + '</span>';
                         html += '</td>';
                         html += '<td class="price-cell">&#8377;' + p.price.toLocaleString('en-IN') + '</td>';
                         html += '<td class="action-cell">';
@@ -393,6 +396,7 @@ _EXPENSIVE_KW = {"phone", "mobile", "laptop", "tablet", "tv", "television", "mon
                  "refrigerator", "washing", "microwave", "ac", "air conditioner"}
 _MIN_PRICE_EXPENSIVE = 3000  # Phones/laptops won't be Rs 399
 _COMPARE_CACHE_TTL_SECONDS = 900
+_COMPARE_CACHE_VERSION = 2
 _COMPARE_CACHE = {}
 _QUANTITY_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ml|l|ltr|litre|liter|kg|g)\b", re.IGNORECASE)
 _LIQUID_QUERY_HINTS = {"oil", "milk", "juice", "water", "drink", "beverage"}
@@ -496,7 +500,7 @@ def _pick_target_quantity_bucket(query: str, priced_products):
     candidates = []
     query_words = set(query.lower().split())
     for product in priced_products:
-        quantity = _extract_quantity(product.name)
+        quantity = _extract_quantity(" ".join(part for part in [product.name, product.details] if part))
         if quantity:
             candidates.append(quantity)
 
@@ -534,7 +538,7 @@ def _filter_products_to_comparable_quantity(products, query: str, diagnostics: d
     require_explicit_quantity = bool(query_words & _LIQUID_QUERY_HINTS)
 
     for product in priced_products:
-        quantity = _extract_quantity(product.name)
+        quantity = _extract_quantity(" ".join(part for part in [product.name, product.details] if part))
         if quantity is None:
             if require_explicit_quantity:
                 dropped_products.append(product)
@@ -582,7 +586,7 @@ def _build_compare_summary(products, diagnostics, cached=False) -> str:
 
 
 def _cache_key(query: str, sites) -> tuple:
-    return query.lower(), tuple(sites)
+    return _COMPARE_CACHE_VERSION, query.lower(), tuple(sites)
 
 
 def _get_cached_compare_result(query: str, sites):
@@ -748,3 +752,4 @@ async def chat_endpoint(request: ChatRequest):
         raise
     except Exception:
         raise HTTPException(status_code=500, detail="Something went wrong while generating a reply.")
+

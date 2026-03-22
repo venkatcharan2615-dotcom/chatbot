@@ -334,6 +334,7 @@ async def inspect_batch_search(query: str, site_keys: List[str]) -> dict:
             "url": info.get("url"),
             "fallback": info.get("fallback"),
             "title": info.get("title"),
+            "details": info.get("details"),
         }
     return {"query": query, "refined_query": refined, "sites": diagnostics, "error": None}
 
@@ -382,6 +383,7 @@ def _ddgs_mine_prices_sync(query: str, original_query: str, sites: Dict[str, dic
             "prices": [],
             "url": cfg["fallback"],  # default to search URL
             "title": f"{original_query} on {cfg['display']}",
+            "details": "",
             "fallback": cfg["fallback"],
             "domain": domain,
         }
@@ -444,6 +446,8 @@ def _ddgs_mine_prices_sync(query: str, original_query: str, sites: Dict[str, dic
                             if clean.startswith(prefix):
                                 clean = clean[len(prefix):]
                         info["title"] = clean
+                    if body:
+                        info["details"] = body[:160]
 
             # Skip price extraction from irrelevant or variant-mismatched results
             if not is_relevant or variant_mismatch:
@@ -553,3 +557,7 @@ async def brave_web_search(query: str) -> str:
     """Search the web and return text snippets for AI grounding."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, _web_search_sync, query)
+
+
+
+

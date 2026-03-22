@@ -144,6 +144,41 @@ def _refine_query(query: str) -> str:
 def _is_accessory(title: str) -> bool:
     return bool(_ACCESSORY_WORDS.search(title))
 
+# Product variant keywords — if these appear in a result but NOT in the query,
+# the result is for a different product variant and should be excluded.
+# ONLY applies to electronics with a brand+model number pattern.
+_VARIANT_WORDS = {"pro", "plus", "ultra", "max", "mini", "lite", "se",
+                  "fe", "neo", "turbo", "slim", "note"}
+
+# Brands where variant keywords actually mean a different SKU/price tier
+_VARIANT_BRANDS = _PHONE_BRANDS | {"ipad", "macbook", "surface", "tab",
+                                    "redmi", "poco", "narzo", "gt"}
+
+# Pattern: a number (model number) in the query, e.g. "iPhone 17", "Galaxy S25"
+_MODEL_NUMBER_RE = re.compile(r"\d")
+
+def _has_variant_mismatch(query_lower: str, title_lower: str) -> bool:
+    """Return True if the title is for a different product variant than the query.
+
+    Only applies when the query looks like an electronics product with a model
+    number (e.g. 'iPhone 17', 'Samsung Galaxy S25', 'Realme Narzo 70').
+    Does NOT apply to generic products like 'boAt headphones' or 'Nike shoes'
+    where 'Pro' is just a model name, not a price-tier variant.
+    """
+    q_words = set(query_lower.split())
+
+    # Only check for variant mismatch on electronics with a model number
+    has_brand = bool(q_words & _VARIANT_BRANDS)
+    has_number = bool(_MODEL_NUMBER_RE.search(query_lower))
+    if not (has_brand and has_number):
+        return False
+
+    t_words = set(title_lower.split())
+    title_variants = t_words & _VARIANT_WORDS
+    query_variants = q_words & _VARIANT_WORDS
+    # If the title has variant words NOT present in the query → mismatch
+    return bool(title_variants - query_variants)
+
 # ---------------------------------------------------------------------------
 #  URL / domain classification
 # ---------------------------------------------------------------------------
@@ -357,9 +392,15 @@ def _ddgs_mine_prices_sync(query: str, original_query: str, sites: Dict[str, dic
             if not is_direct and not is_mentioned:
                 continue
 
+            # Variant mismatch check: skip results for different product variants
+            # e.g. query="iPhone 17" but result="iPhone 17 Pro"
+            variant_mismatch = _has_variant_mismatch(
+                original_query.lower(), title.lower(),
+            )
+
             # Direct e-commerce URL — save as best URL (prefer product pages over search)
             if is_direct and info["url"] == info["fallback"]:
-                if not _is_accessory(title) and is_relevant:
+                if not _is_accessory(title) and is_relevant and not variant_mismatch:
                     info["url"] = href
                     if title:
                         clean = title[:100]
@@ -368,8 +409,8 @@ def _ddgs_mine_prices_sync(query: str, original_query: str, sites: Dict[str, dic
                                 clean = clean[len(prefix):]
                         info["title"] = clean
 
-            # Skip price extraction from irrelevant results
-            if not is_relevant:
+            # Skip price extraction from irrelevant or variant-mismatched results
+            if not is_relevant or variant_mismatch:
                 continue
 
             # Extract price near this store's mention

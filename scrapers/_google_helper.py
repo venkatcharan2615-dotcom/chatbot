@@ -161,14 +161,41 @@ async def brave_web_search(query: str) -> str:
         return ""
 
 
+# NEWS sites — their prices mention deals/exchange/discounts and are unreliable
+_NEWS_DOMAINS = {
+    "timesofindia", "indiatimes.com", "news18", "hindustantimes",
+    "indianexpress", "youtube.com", "quora.com", "reddit.com",
+    "twitter.com", "facebook.com", "gizmochina", "tomsguide",
+    "techradar", "digit.in", "compareraja",
+}
+
+# TRUSTED comparison sites — their prices are the actual current selling price
+_TRUSTED_PRICE_SITES = {
+    "91mobiles", "smartprix", "mysmartprice", "gadgets360", "ndtv.com/gadgets",
+    "pricebefore", "pricedekho", "gsmarena",
+}
+
+def _is_news_url(href: str) -> bool:
+    """Check if a URL belongs to a news site (unreliable prices)."""
+    href_lower = href.lower()
+    return any(nd in href_lower for nd in _NEWS_DOMAINS)
+
+def _is_trusted_price_site(href: str) -> bool:
+    """Check if a URL belongs to a trusted price comparison site."""
+    href_lower = href.lower()
+    return any(ts in href_lower for ts in _TRUSTED_PRICE_SITES)
+
+
 def _clean_brave_title(title: str, site_name: str) -> str:
-    """Strip Brave's site-name prefix from titles like 'Flipkartflipkart.com› home › ...'."""
-    # Remove site prefix patterns like "Flipkartflipkart.com› path › ..."
-    title = re.sub(r'^[A-Za-z]+[a-z]+\.(?:com|in|org)[›\s]+(?:[^›]+[›\s]+)*', '', title).strip()
+    """Strip Brave's site-name prefix from titles."""
+    # Remove domain prefix patterns like "timesofindia.indiatimes.com› path › ..."
+    # or "Flipkartflipkart.com› home › ..." (handles subdomains too)
+    title = re.sub(r'^[A-Za-z0-9]+(?:\.[a-z0-9]+)*\.(?:com|in|org|net)[›\s]+(?:[^›]+[›\s]+)*', '', title).strip()
     # Remove YouTube duration prefix like "05:47YouTube"
     title = re.sub(r'^\d{2}:\d{2}YouTube', '', title).strip()
     # Remove leading site names
-    for prefix in [site_name, "Times of India", "YouTube", "My Mobile India"]:
+    for prefix in [site_name, "Times of India", "YouTube", "My Mobile India",
+                   "Gadgets360", "Smartprix", "91mobiles"]:
         if title.startswith(prefix):
             title = title[len(prefix):].strip()
     # Clean breadcrumb separators
@@ -178,6 +205,55 @@ def _clean_brave_title(title: str, site_name: str) -> str:
 
 async def _brave_search(query: str, site_domain: str, site_name: str, fallback_url: str) -> List[Product]:
     """Brave Search — works reliably from cloud IPs."""
+    search_query = f"{query} price site:{site_domain}"
+    url = "https://search.brave.com/search"
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+            resp = await client.get(url, params={"q": search_query, "country": "in"}, headers={
+                "User-Agent": _USER_AGENTS[0],
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-IN,en;q=0.9",
+            })
+        if resp.status_code != 200:
+            # Try broader query if site: query fails or gets rate-limited
+            return await _brave_search_broad(query, site_domain, site_name, fallback_url)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        products = []
+
+        for r in soup.select("#results .snippet, [data-type='web']")[:10]:
+            title_el = r.select_one(".snippet-title, .title, h2 a, a")
+            desc_el = r.select_one(".snippet-description, .snippet-content, .description")
+            url_el = r.select_one("a[href^='http']")
+
+            title = title_el.get_text(strip=True) if title_el else ""
+            desc = desc_el.get_text(strip=True) if desc_el else ""
+            href = url_el.get("href", "") if url_el else ""
+            all_text = title + " " + desc
+
+            # STRICT: Only accept results that link directly to the target site
+            if site_domain not in href:
+                continue
+
+            # Skip news/review site URLs that somehow contain the domain
+            if _is_news_url(href):
+                continue
+
+            price = _parse_price(all_text)
+            if price > 0:
+                clean_title = _clean_brave_title(title, site_name) if title else f"{site_name} {query}"
+                products.append(Product(
+                    name=clean_title[:100],
+                    price=price, url=href, site=site_name, rating=None
+                ))
+
+        if products:
+            return products[:3]
+        # site: query returned results but none had direct URLs — try broad query
+        return await _brave_search_broad(query, site_domain, site_name, fallback_url)
+    except Exception:
+        pass
+    return []
+    """Fallback Brave search without site: operator — tiered URL filtering."""
     search_query = f"{query} price {site_name} India"
     url = "https://search.brave.com/search"
     try:
@@ -190,7 +266,8 @@ async def _brave_search(query: str, site_domain: str, site_name: str, fallback_u
         if resp.status_code != 200:
             return []
         soup = BeautifulSoup(resp.text, "html.parser")
-        products = []
+        direct_products = []  # URLs pointing to the actual e-commerce site
+        comparison_products = []  # Prices from trusted comparison sites
         site_lower = site_name.lower()
 
         for r in soup.select("#results .snippet, [data-type='web']")[:10]:
@@ -203,21 +280,30 @@ async def _brave_search(query: str, site_domain: str, site_name: str, fallback_u
             href = url_el.get("href", "") if url_el else ""
             all_text = title + " " + desc
 
-            # Must relate to our target site
-            if site_lower not in all_text.lower() and site_domain not in href:
+            price = _parse_price(all_text)
+            if price <= 0:
                 continue
 
-            price = _parse_price(all_text)
-            if price > 0:
-                product_url = href if site_domain in href else fallback_url
-                clean_title = _clean_brave_title(title, site_name) if title else f"{site_name} {query}"
-                products.append(Product(
-                    name=clean_title[:100],
-                    price=price, url=product_url, site=site_name, rating=None
-                ))
+            clean_title = _clean_brave_title(title, site_name) if title else f"{site_name} {query}"
 
-        if products:
-            return products[:3]
+            # Tier 1: Direct product URL from the target site
+            if site_domain in href and not _is_news_url(href):
+                direct_products.append(Product(
+                    name=clean_title[:100],
+                    price=price, url=href, site=site_name, rating=None
+                ))
+            # Tier 2: Trusted comparison site mentioning our target site
+            elif _is_trusted_price_site(href) and site_lower in all_text.lower():
+                comparison_products.append(Product(
+                    name=clean_title[:100],
+                    price=price, url=fallback_url, site=site_name, rating=None
+                ))
+            # Skip: news sites, social media, etc.
+
+        if direct_products:
+            return direct_products[:3]
+        if comparison_products:
+            return comparison_products[:3]
     except Exception:
         pass
     return []
@@ -237,7 +323,8 @@ async def _ddg_lite_search(query: str, site_domain: str, site_name: str, fallbac
         if resp.status_code != 200:
             return []
         soup = BeautifulSoup(resp.text, "html.parser")
-        products = []
+        direct_products = []
+        comparison_products = []
         site_lower = site_name.lower()
 
         # DDG Lite uses table rows with result links and snippet text
@@ -257,19 +344,27 @@ async def _ddg_lite_search(query: str, site_domain: str, site_name: str, fallbac
                         snippet += " " + nr.get_text(strip=True)
 
                 all_text = title + " " + snippet
-                if site_lower not in all_text.lower() and site_domain not in href:
+                price = _parse_price(all_text)
+                if price <= 0:
                     continue
 
-                price = _parse_price(all_text)
-                if price > 0:
-                    product_url = href if site_domain in href else fallback_url
-                    products.append(Product(
-                        name=title[:100] if title else f"{site_name} {query}",
-                        price=price, url=product_url, site=site_name, rating=None
+                clean_name = title[:100] if title else f"{site_name} {query}"
+
+                # Tier 1: Direct product URL
+                if site_domain in href and not _is_news_url(href):
+                    direct_products.append(Product(
+                        name=clean_name, price=price, url=href, site=site_name, rating=None
+                    ))
+                # Tier 2: Trusted comparison site
+                elif _is_trusted_price_site(href) and site_lower in all_text.lower():
+                    comparison_products.append(Product(
+                        name=clean_name, price=price, url=fallback_url, site=site_name, rating=None
                     ))
 
-        if products:
-            return products[:3]
+        if direct_products:
+            return direct_products[:3]
+        if comparison_products:
+            return comparison_products[:3]
     except Exception:
         pass
     return []
@@ -307,6 +402,7 @@ async def _bing_search(query: str, site_domain: str, site_name: str, fallback_ur
             if resp2.status_code == 200:
                 soup2 = BeautifulSoup(resp2.text, "html.parser")
                 site_lower = site_name.lower()
+                comparison_products = []
                 for result in soup2.select("li.b_algo, .b_algo")[:6]:
                     title_el = result.select_one("h2 a, h2")
                     if not title_el:
@@ -314,12 +410,17 @@ async def _bing_search(query: str, site_domain: str, site_name: str, fallback_ur
                     title = title_el.get_text(strip=True)
                     href = title_el.get("href", "")
                     snippet = result.get_text(" ", strip=True)
-                    if site_lower not in (title + " " + snippet).lower() and site_domain not in href:
-                        continue
                     price = _parse_price(snippet)
-                    if price > 0:
-                        product_url = href if site_domain in href else fallback_url
-                        products.append(Product(name=title[:100], price=price, url=product_url, site=site_name, rating=None))
+                    if price <= 0:
+                        continue
+                    # Tier 1: Direct site URL
+                    if site_domain in href and not _is_news_url(href):
+                        products.append(Product(name=title[:100], price=price, url=href, site=site_name, rating=None))
+                    # Tier 2: Trusted comparison site
+                    elif _is_trusted_price_site(href) and site_lower in (title + " " + snippet).lower():
+                        comparison_products.append(Product(name=title[:100], price=price, url=fallback_url, site=site_name, rating=None))
+                if not products and comparison_products:
+                    products = comparison_products
 
         if products:
             return products[:3]

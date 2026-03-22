@@ -530,11 +530,16 @@ def _filter_products_to_comparable_quantity(products, query: str, diagnostics: d
     dropped_products = []
     target_family, target_amount = target_quantity
     tolerance = max(150, int(target_amount * 0.12))
+    query_words = set(query.lower().split())
+    require_explicit_quantity = bool(query_words & _LIQUID_QUERY_HINTS)
 
     for product in priced_products:
         quantity = _extract_quantity(product.name)
         if quantity is None:
-            kept_priced.append(product)
+            if require_explicit_quantity:
+                dropped_products.append(product)
+            else:
+                kept_priced.append(product)
             continue
         family, amount = quantity
         if family == target_family and abs(amount - target_amount) <= tolerance:

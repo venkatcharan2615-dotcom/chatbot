@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 from urllib.parse import quote_plus
 
@@ -393,6 +394,8 @@ _EXPENSIVE_KW = {"phone", "mobile", "laptop", "tablet", "tv", "television", "mon
 _MIN_PRICE_EXPENSIVE = 3000  # Phones/laptops won't be Rs 399
 _COMPARE_CACHE_TTL_SECONDS = 900
 _COMPARE_CACHE = {}
+_QUANTITY_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ml|l|ltr|litre|liter|kg|g)\b", re.IGNORECASE)
+_LIQUID_QUERY_HINTS = {"oil", "milk", "juice", "water", "drink", "beverage"}
 
 
 def _site_display_name(site_key: str) -> str:
@@ -457,6 +460,99 @@ def _merge_products(primary_products, fallback_products):
     return merged
 
 
+def _extract_quantity(text: str):
+    if not text:
+        return None
+    matches = _QUANTITY_RE.findall(text.lower())
+    if not matches:
+        return None
+    value, unit = matches[-1]
+    amount = float(value)
+    if unit in {"l", "ltr", "litre", "liter"}:
+        return ("liquid", round(amount * 1000))
+    if unit == "ml":
+        return ("liquid", round(amount))
+    if unit == "kg":
+        return ("weight", round(amount * 1000))
+    if unit == "g":
+        return ("weight", round(amount))
+    return None
+
+
+def _quantity_label(quantity_info):
+    if not quantity_info:
+        return "unknown"
+    family, amount = quantity_info
+    if family == "liquid":
+        return f"{amount / 1000:g} L" if amount >= 1000 else f"{amount:g} ml"
+    return f"{amount / 1000:g} kg" if amount >= 1000 else f"{amount:g} g"
+
+
+def _pick_target_quantity_bucket(query: str, priced_products):
+    query_quantity = _extract_quantity(query)
+    if query_quantity:
+        return query_quantity
+
+    candidates = []
+    query_words = set(query.lower().split())
+    for product in priced_products:
+        quantity = _extract_quantity(product.name)
+        if quantity:
+            candidates.append(quantity)
+
+    if not candidates:
+        return None
+
+    family_counts = {}
+    for quantity in candidates:
+        family_counts[quantity] = family_counts.get(quantity, 0) + 1
+
+    def sort_key(item):
+        quantity, count = item
+        family, amount = quantity
+        preferred_family = 0 if (family == "liquid" and query_words & _LIQUID_QUERY_HINTS) else 1
+        return (-count, preferred_family, amount)
+
+    return min(family_counts.items(), key=sort_key)[0]
+
+
+def _filter_products_to_comparable_quantity(products, query: str, diagnostics: dict):
+    priced_products = [p for p in products if p.price > 0]
+    unpriced_products = [p for p in products if p.price <= 0]
+    if len(priced_products) <= 1:
+        return products
+
+    target_quantity = _pick_target_quantity_bucket(query, priced_products)
+    if not target_quantity:
+        return products
+
+    kept_priced = []
+    dropped_products = []
+    target_family, target_amount = target_quantity
+    tolerance = max(150, int(target_amount * 0.12))
+
+    for product in priced_products:
+        quantity = _extract_quantity(product.name)
+        if quantity is None:
+            kept_priced.append(product)
+            continue
+        family, amount = quantity
+        if family == target_family and abs(amount - target_amount) <= tolerance:
+            kept_priced.append(product)
+        else:
+            dropped_products.append(product)
+
+    if kept_priced:
+        diagnostics["quantity_bucket"] = _quantity_label(target_quantity)
+        diagnostics["quantity_filtered_out"] = [
+            {"site": product.site, "name": product.name}
+            for product in dropped_products
+        ]
+        return kept_priced + unpriced_products
+
+    return products
+
+
 def _build_compare_summary(products, diagnostics, cached=False) -> str:
     priced = [p for p in products if p.price > 0]
     if priced:
@@ -495,6 +591,9 @@ def _get_cached_compare_result(query: str, sites):
 
 
 def _set_cached_compare_result(query: str, sites, result: ComparisonResult) -> None:
+    if len(_COMPARE_CACHE) >= 200:
+        oldest_key = min(_COMPARE_CACHE, key=lambda k: _COMPARE_CACHE[k]["timestamp"])
+        del _COMPARE_CACHE[oldest_key]
     _COMPARE_CACHE[_cache_key(query, sites)] = {
         "timestamp": time.time(),
         "result": result,
@@ -503,7 +602,7 @@ def _set_cached_compare_result(query: str, sites, result: ComparisonResult) -> N
 
 def _log_compare_diagnostics(query: str, diagnostics: dict) -> None:
     logger.warning(
-        "compare diagnostics | query=%r sites=%s batch_requested=%s batch_error=%r grocery_errors=%s raw_products=%s filtered_products=%s fallback_products=%s partial_failure=%s cache_hit=%s",
+        "compare diagnostics | query=%r sites=%s batch_requested=%s batch_error=%r grocery_errors=%s raw_products=%s filtered_products=%s fallback_products=%s partial_failure=%s cache_hit=%s quantity_bucket=%s quantity_filtered_out=%s",
         query,
         diagnostics.get("sites"),
         diagnostics.get("batch_requested"),
@@ -514,6 +613,8 @@ def _log_compare_diagnostics(query: str, diagnostics: dict) -> None:
         diagnostics.get("fallback_products"),
         diagnostics.get("partial_failure"),
         diagnostics.get("cache_hit", False),
+        diagnostics.get("quantity_bucket"),
+        diagnostics.get("quantity_filtered_out"),
     )
 
 def _pick_sites(query: str) -> list:
@@ -563,6 +664,8 @@ async def compare_endpoint(request: ComparisonRequest):
             "filtered_products": 0,
             "fallback_products": 0,
             "partial_failure": False,
+            "quantity_bucket": None,
+            "quantity_filtered_out": [],
         }
 
         if not batch_keys and not grocery_keys:
@@ -601,6 +704,7 @@ async def compare_endpoint(request: ComparisonRequest):
         diagnostics["raw_products"] = len(all_products)
 
         all_products = _filter_junk_prices(all_products, query)
+        all_products = _filter_products_to_comparable_quantity(all_products, query, diagnostics)
         diagnostics["filtered_products"] = len(all_products)
         fallback_products = [
             _build_site_fallback_product(site, query)

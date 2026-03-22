@@ -200,6 +200,22 @@ async def root():
     <script>
         let chatHistory = [];
 
+        function escapeHtml(value) {
+            const d = document.createElement('div');
+            d.textContent = value == null ? '' : String(value);
+            return d.innerHTML;
+        }
+
+        function safeUrl(value) {
+            if (!value) return '';
+            try {
+                const url = new URL(value, window.location.origin);
+                return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+            } catch (_err) {
+                return '';
+            }
+        }
+
         function switchTab(tab, btn) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -232,7 +248,7 @@ async def root():
                 const data = await res.json();
                 const priced = data.all_products.filter(p => p.price > 0).sort((a,b) => a.price - b.price);
                 const unpriced = data.all_products.filter(p => p.price <= 0);
-                let html = '<div class="summary-card"><strong>&#129302; AI Recommendation:</strong> ' + data.summary + '</div>';
+                let html = '<div class="summary-card"><strong>&#129302; AI Recommendation:</strong> ' + escapeHtml(data.summary) + '</div>';
 
                 if (priced.length > 0) {
                     html += '<div class="section-title">Price Comparison &mdash; ' + priced.length + ' results found</div>';
@@ -241,15 +257,18 @@ async def root():
                     html += '</tr></thead><tbody>';
                     priced.forEach((p, i) => {
                         const isBest = i === 0;
+                        const safeSite = escapeHtml(p.site);
+                        const safeName = escapeHtml(p.name);
+                        const safeHref = safeUrl(p.url);
                         html += '<tr class="' + (isBest ? 'best-row' : '') + '">';
                         html += '<td class="rank">' + (i+1) + '</td>';
-                        html += '<td class="site-cell"><span class="site-pill">' + p.site + '</span></td>';
-                        html += '<td class="name-cell">' + p.name;
+                        html += '<td class="site-cell"><span class="site-pill">' + safeSite + '</span></td>';
+                        html += '<td class="name-cell">' + safeName;
                         if (isBest) html += '<span class="best-tag">&#9733; Best Price</span>';
                         html += '</td>';
                         html += '<td class="price-cell">&#8377;' + p.price.toLocaleString('en-IN') + '</td>';
                         html += '<td class="action-cell">';
-                        if (p.url) html += '<a class="visit-btn" href="' + p.url + '" target="_blank" rel="noopener">Visit &rarr;</a>';
+                        if (safeHref) html += '<a class="visit-btn" href="' + safeHref + '" target="_blank" rel="noopener">Visit &rarr;</a>';
                         html += '</td></tr>';
                     });
                     html += '</tbody></table>';
@@ -263,25 +282,21 @@ async def root():
                     html += 'Also check on ' + unpriced.length + ' more site' + (unpriced.length>1?'s':'') + ' <span class="arrow">&#9660;</span></div>';
                     html += '<div class="no-price-list" id="npList" style="display:none;">';
                     unpriced.forEach(p => {
+                        const safeSite = escapeHtml(p.site);
+                        const safeHref = safeUrl(p.url);
                         html += '<div class="no-price-chip">';
-                        html += '<span class="chip-site">' + p.site + '</span>';
-                        if (p.url) html += '<a href="' + p.url + '" target="_blank" rel="noopener">Search &rarr;</a>';
+                        html += '<span class="chip-site">' + safeSite + '</span>';
+                        if (safeHref) html += '<a href="' + safeHref + '" target="_blank" rel="noopener">Search &rarr;</a>';
                         html += '</div>';
                     });
                     html += '</div></div>';
                 }
                 results.innerHTML = html;
             } catch(e) {
-                results.innerHTML = '<div class="error-card">' + e.message + '</div>';
+                results.innerHTML = '<div class="error-card">' + escapeHtml(e.message) + '</div>';
             }
             btn.disabled = false;
             loading.style.display = 'none';
-        }
-
-        function escapeHtml(s) {
-            const d = document.createElement('div');
-            d.textContent = s;
-            return d.innerHTML;
         }
 
         function toggleNp() {
@@ -403,7 +418,7 @@ async def compare_endpoint(request: ComparisonRequest):
             raise HTTPException(status_code=400, detail="Please enter a product to search for.")
         query = request.query.strip()[:200]  # Limit query length
         if request.sites:
-            sites = request.sites
+            sites = list(dict.fromkeys(site.strip().lower() for site in request.sites if site and site.strip()))
         else:
             sites = _pick_sites(query)
         
@@ -443,14 +458,18 @@ async def compare_endpoint(request: ComparisonRequest):
         return ComparisonResult(best_product=best, all_products=all_products, summary=summary)
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Something went wrong while comparing products.")
 
 @app.post("/chatbot/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     try:
+        if not request.message or not request.message.strip():
+            raise HTTPException(status_code=400, detail="Please enter a message.")
         history = [{"role": m.role, "content": m.content} for m in request.history] if request.history else None
-        reply = await chat_with_ai(request.message, history)
+        reply = await chat_with_ai(request.message.strip()[:1000], history)
         return ChatResponse(reply=reply)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Something went wrong while generating a reply.")

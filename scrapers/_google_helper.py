@@ -452,7 +452,7 @@ def _ddgs_mine_prices_sync(query: str, original_query: str, sites: Dict[str, dic
 
 async def _ddgs_mine_prices(query: str, original_query: str, sites: Dict[str, dict]) -> dict:
     """Async wrapper — runs sync DDGS in thread pool."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         _executor, _ddgs_mine_prices_sync, query, original_query, sites,
     )
@@ -515,5 +515,5 @@ def _web_search_sync(query: str) -> str:
 
 async def brave_web_search(query: str) -> str:
     """Search the web and return text snippets for AI grounding."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, _web_search_sync, query)

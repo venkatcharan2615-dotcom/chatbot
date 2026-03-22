@@ -1,14 +1,20 @@
+import asyncio
+import logging
+import time
+from urllib.parse import quote_plus
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
+
+from affiliate import tag_products
+from compare import compare_products
+from llm.openai_llm import summarize_products, chat_with_ai
 from models import ComparisonRequest, ComparisonResult, Product, ChatRequest, ChatResponse
 from scrapers._google_helper import batch_search_all_sites
 from scrapers.others import scrape_zepto, scrape_zomato, scrape_instamart
-from compare import compare_products
-from llm.openai_llm import summarize_products, chat_with_ai
-from affiliate import tag_products
-import asyncio
 
 app = FastAPI()
+logger = logging.getLogger("shopsmart.compare")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -385,6 +391,130 @@ _EXPENSIVE_KW = {"phone", "mobile", "laptop", "tablet", "tv", "television", "mon
                  "iphone", "samsung", "pixel", "oneplus", "macbook", "ipad", "galaxy",
                  "refrigerator", "washing", "microwave", "ac", "air conditioner"}
 _MIN_PRICE_EXPENSIVE = 3000  # Phones/laptops won't be Rs 399
+_COMPARE_CACHE_TTL_SECONDS = 900
+_COMPARE_CACHE = {}
+
+
+def _site_display_name(site_key: str) -> str:
+    return {
+        "amazon": "Amazon",
+        "flipkart": "Flipkart",
+        "myntra": "Myntra",
+        "snapdeal": "Snapdeal",
+        "ajio": "Ajio",
+        "tatacliq": "TataCliq",
+        "zepto": "Zepto",
+        "zomato": "Zomato",
+        "instamart": "Instamart",
+    }.get(site_key, site_key.title())
+
+
+def _site_fallback_url(site_key: str, query: str) -> str:
+    encoded_query = quote_plus(query)
+    hyphen_query = query.replace(" ", "-")
+    if site_key == "amazon":
+        return f"https://www.amazon.in/s?k={encoded_query}"
+    if site_key == "flipkart":
+        return f"https://www.flipkart.com/search?q={encoded_query}"
+    if site_key == "myntra":
+        return f"https://www.myntra.com/{hyphen_query}"
+    if site_key == "snapdeal":
+        return f"https://www.snapdeal.com/search?keyword={encoded_query}"
+    if site_key == "ajio":
+        return f"https://www.ajio.com/search/?text={encoded_query}"
+    if site_key == "tatacliq":
+        return f"https://www.tatacliq.com/search/?searchCategory=all&text={encoded_query}"
+    if site_key == "zepto":
+        return f"https://www.zeptonow.com/search?query={encoded_query}"
+    if site_key == "zomato":
+        return f"https://www.zomato.com/search?q={encoded_query}"
+    if site_key == "instamart":
+        return f"https://www.swiggy.com/instamart/search?query={encoded_query}"
+    return ""
+
+
+def _build_site_fallback_product(site_key: str, query: str) -> Product:
+    display = _site_display_name(site_key)
+    return Product(
+        name=f"{display} search for {query}",
+        price=0,
+        url=_site_fallback_url(site_key, query),
+        site=display,
+        rating=None,
+        details=f"Open {display} search results",
+    )
+
+
+def _merge_products(primary_products, fallback_products):
+    merged = []
+    seen = set()
+    for product in list(primary_products) + list(fallback_products):
+        key = (product.site.strip().lower(), product.url.strip().lower(), round(product.price, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(product)
+    return merged
+
+
+def _build_compare_summary(products, diagnostics, cached=False) -> str:
+    priced = [p for p in products if p.price > 0]
+    if priced:
+        summary = summarize_products(priced)
+        if diagnostics.get("partial_failure"):
+            return f"{summary} Note: some sites are showing fallback search links because live search was unavailable."
+        if cached:
+            return f"{summary} Cached results shown from a recent successful search."
+        return summary
+
+    fallback_count = len(products)
+    source = "cached search results" if cached else "live search"
+    if diagnostics.get("partial_failure"):
+        return (
+            f"Live prices were temporarily unavailable, so showing {fallback_count} site search link"
+            f"{'s' if fallback_count != 1 else ''}. Try again shortly for fresh prices."
+        )
+    return (
+        f"No live prices found from {source}. Showing {fallback_count} site search link"
+        f"{'s' if fallback_count != 1 else ''} so you can continue manually."
+    )
+
+
+def _cache_key(query: str, sites) -> tuple:
+    return query.lower(), tuple(sites)
+
+
+def _get_cached_compare_result(query: str, sites):
+    cached = _COMPARE_CACHE.get(_cache_key(query, sites))
+    if not cached:
+        return None
+    if time.time() - cached["timestamp"] > _COMPARE_CACHE_TTL_SECONDS:
+        _COMPARE_CACHE.pop(_cache_key(query, sites), None)
+        return None
+    return cached["result"]
+
+
+def _set_cached_compare_result(query: str, sites, result: ComparisonResult) -> None:
+    _COMPARE_CACHE[_cache_key(query, sites)] = {
+        "timestamp": time.time(),
+        "result": result,
+    }
+
+
+def _log_compare_diagnostics(query: str, diagnostics: dict) -> None:
+    logger.warning(
+        "compare diagnostics | query=%r sites=%s batch_requested=%s batch_error=%r grocery_errors=%s raw_products=%s filtered_products=%s fallback_products=%s partial_failure=%s cache_hit=%s",
+        query,
+        diagnostics.get("sites"),
+        diagnostics.get("batch_requested"),
+        diagnostics.get("batch_error"),
+        diagnostics.get("grocery_errors"),
+        diagnostics.get("raw_products"),
+        diagnostics.get("filtered_products"),
+        diagnostics.get("fallback_products"),
+        diagnostics.get("partial_failure"),
+        diagnostics.get("cache_hit", False),
+    )
 
 def _pick_sites(query: str) -> list:
     """Pick relevant sites based on query keywords."""
@@ -424,9 +554,25 @@ async def compare_endpoint(request: ComparisonRequest):
         
         batch_keys = [s for s in sites if s in BATCH_SITES]
         grocery_keys = [s for s in sites if s in GROCERY_SCRAPER_MAP]
+        diagnostics = {
+            "sites": sites,
+            "batch_requested": batch_keys,
+            "batch_error": None,
+            "grocery_errors": [],
+            "raw_products": 0,
+            "filtered_products": 0,
+            "fallback_products": 0,
+            "partial_failure": False,
+        }
 
         if not batch_keys and not grocery_keys:
             raise HTTPException(status_code=400, detail="No valid e-commerce sites specified.")
+
+        cached_result = _get_cached_compare_result(query, sites)
+        if cached_result:
+            diagnostics["cache_hit"] = True
+            _log_compare_diagnostics(query, diagnostics)
+            return cached_result
 
         # Batch search: ONE search covers all e-commerce sites (2-4 HTTP requests)
         all_products = []
@@ -435,7 +581,9 @@ async def compare_endpoint(request: ComparisonRequest):
                 all_products = await asyncio.wait_for(
                     batch_search_all_sites(query, batch_keys), timeout=25,
                 )
-            except (asyncio.TimeoutError, Exception):
+            except (asyncio.TimeoutError, Exception) as exc:
+                diagnostics["batch_error"] = type(exc).__name__
+                diagnostics["partial_failure"] = True
                 all_products = []
 
         # Grocery sites still use individual scrapers
@@ -443,19 +591,37 @@ async def compare_endpoint(request: ComparisonRequest):
             async def _scrape_grocery(site):
                 try:
                     return await asyncio.wait_for(GROCERY_SCRAPER_MAP[site](query), timeout=15)
-                except (asyncio.TimeoutError, Exception):
+                except (asyncio.TimeoutError, Exception) as exc:
+                    diagnostics["grocery_errors"].append({site: type(exc).__name__})
+                    diagnostics["partial_failure"] = True
                     return []
             grocery_results = await asyncio.gather(*[_scrape_grocery(s) for s in grocery_keys])
             for sublist in grocery_results:
                 all_products.extend(sublist)
+        diagnostics["raw_products"] = len(all_products)
+
         all_products = _filter_junk_prices(all_products, query)
+        diagnostics["filtered_products"] = len(all_products)
+        fallback_products = [
+            _build_site_fallback_product(site, query)
+            for site in sites
+            if _site_display_name(site) not in {product.site for product in all_products}
+        ]
+        diagnostics["fallback_products"] = len(fallback_products)
+        all_products = _merge_products(all_products, fallback_products)
+
         if not all_products:
+            _log_compare_diagnostics(query, diagnostics)
             raise HTTPException(status_code=404, detail="No products found.")
+
         best = compare_products(all_products)
         tag_products(all_products)
-        priced = [p for p in all_products if p.price > 0]
-        summary = summarize_products(priced if priced else all_products)
-        return ComparisonResult(best_product=best, all_products=all_products, summary=summary)
+        summary = _build_compare_summary(all_products, diagnostics)
+        result = ComparisonResult(best_product=best, all_products=all_products, summary=summary)
+        if any(product.price > 0 for product in all_products):
+            _set_cached_compare_result(query, sites, result)
+        _log_compare_diagnostics(query, diagnostics)
+        return result
     except HTTPException:
         raise
     except Exception:

@@ -302,6 +302,42 @@ async def batch_search_all_sites(query: str, site_keys: List[str]) -> List[Produ
     return all_products
 
 
+async def inspect_batch_search(query: str, site_keys: List[str]) -> dict:
+    """Return raw DDGS mining diagnostics for a query."""
+    refined = _refine_query(query)
+    sites: Dict[str, dict] = {}
+    for key in site_keys:
+        cfg = _SITE_CONFIG.get(key)
+        if cfg:
+            sites[cfg["domain"]] = {
+                "key": key,
+                "display": cfg["display"],
+                "fallback": _fallback_url(key, query),
+            }
+    if not sites:
+        return {"query": query, "refined_query": refined, "sites": {}, "error": "no_valid_sites"}
+
+    try:
+        raw = await asyncio.wait_for(_ddgs_mine_prices(refined, query, sites), timeout=20)
+    except (asyncio.TimeoutError, BaseException) as exc:
+        return {
+            "query": query,
+            "refined_query": refined,
+            "sites": {},
+            "error": type(exc).__name__,
+        }
+
+    diagnostics = {}
+    for display, info in raw.items():
+        diagnostics[display] = {
+            "prices": info.get("prices", []),
+            "url": info.get("url"),
+            "fallback": info.get("fallback"),
+            "title": info.get("title"),
+        }
+    return {"query": query, "refined_query": refined, "sites": diagnostics, "error": None}
+
+
 # ===================================================================
 #  DDGS SNIPPET MINING — extract store+price pairs from ALL results
 # ===================================================================

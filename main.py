@@ -1,12 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from models import ComparisonRequest, ComparisonResult, Product, ChatRequest, ChatResponse
-from scrapers.amazon import scrape_amazon
-from scrapers.flipkart import scrape_flipkart
-from scrapers.others import (
-    scrape_myntra, scrape_snapdeal, scrape_ajio, scrape_tatacliq,
-    scrape_zepto, scrape_zomato, scrape_instamart
-)
+from scrapers._google_helper import batch_search_all_sites
+from scrapers.others import scrape_zepto, scrape_zomato, scrape_instamart
 from compare import compare_products
 from llm.openai_llm import summarize_products, chat_with_ai
 from affiliate import tag_products
@@ -340,17 +336,17 @@ async def root():
 </html>
 """
 
-SCRAPER_MAP = {
-    "amazon": scrape_amazon,
-    "flipkart": scrape_flipkart,
-    "myntra": scrape_myntra,
-    "snapdeal": scrape_snapdeal,
-    "ajio": scrape_ajio,
-    "tatacliq": scrape_tatacliq,
+# Sites handled by batch search (ONE search covers all of these)
+BATCH_SITES = {"amazon", "flipkart", "myntra", "snapdeal", "ajio", "tatacliq"}
+
+# Grocery scrapers still use individual approach
+GROCERY_SCRAPER_MAP = {
     "zepto": scrape_zepto,
     "zomato": scrape_zomato,
     "instamart": scrape_instamart,
 }
+
+ALL_KNOWN_SITES = BATCH_SITES | set(GROCERY_SCRAPER_MAP.keys())
 
 # Category-aware site selection
 GROCERY_SITES = {"zepto", "zomato", "instamart"}
@@ -390,7 +386,7 @@ def _pick_sites(query: str) -> list:
     if is_fashion and not is_grocery:
         return list(FASHION_SITES | GENERAL_SITES | {"snapdeal", "tatacliq"})
     # Default: all non-grocery sites
-    return [s for s in SCRAPER_MAP if s not in GROCERY_SITES]
+    return [s for s in ALL_KNOWN_SITES if s not in GROCERY_SITES]
 
 def _filter_junk_prices(products, query: str):
     """Remove obviously wrong prices (e.g. Rs 399 for a phone = accessory)."""
@@ -411,17 +407,32 @@ async def compare_endpoint(request: ComparisonRequest):
         else:
             sites = _pick_sites(query)
         
-        async def _scrape_with_timeout(site):
-            try:
-                return await asyncio.wait_for(SCRAPER_MAP[site](query), timeout=15)
-            except (asyncio.TimeoutError, Exception):
-                return []
-        
-        tasks = [_scrape_with_timeout(site) for site in sites if site in SCRAPER_MAP]
-        if not tasks:
+        batch_keys = [s for s in sites if s in BATCH_SITES]
+        grocery_keys = [s for s in sites if s in GROCERY_SCRAPER_MAP]
+
+        if not batch_keys and not grocery_keys:
             raise HTTPException(status_code=400, detail="No valid e-commerce sites specified.")
-        results = await asyncio.gather(*tasks)
-        all_products = [p for sublist in results for p in sublist]
+
+        # Batch search: ONE search covers all e-commerce sites (2-4 HTTP requests)
+        all_products = []
+        if batch_keys:
+            try:
+                all_products = await asyncio.wait_for(
+                    batch_search_all_sites(query, batch_keys), timeout=25,
+                )
+            except (asyncio.TimeoutError, Exception):
+                all_products = []
+
+        # Grocery sites still use individual scrapers
+        if grocery_keys:
+            async def _scrape_grocery(site):
+                try:
+                    return await asyncio.wait_for(GROCERY_SCRAPER_MAP[site](query), timeout=15)
+                except (asyncio.TimeoutError, Exception):
+                    return []
+            grocery_results = await asyncio.gather(*[_scrape_grocery(s) for s in grocery_keys])
+            for sublist in grocery_results:
+                all_products.extend(sublist)
         all_products = _filter_junk_prices(all_products, query)
         if not all_products:
             raise HTTPException(status_code=404, detail="No products found.")
